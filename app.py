@@ -1,12 +1,16 @@
 import os
 import io
+import re
+import json
 import random
 import sqlite3
 import urllib.parse
+import urllib.request
 from datetime import datetime, date, timedelta
 import calendar
 
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import plotly.express as px
 import qrcode
@@ -22,20 +26,18 @@ except ImportError:
 # 1. PAGE SETUP & HIDE ALL GITHUB / STREAMLIT MENUS
 # ==============================================================================
 st.set_page_config(
-    page_title="Parivaar VIP 4.0 | Ajay Super App",
+    page_title="Parivaar VIP 5.0 | Universal Super-App",
     page_icon="👑",
     layout="centered",
     initial_sidebar_state="collapsed",
 )
 
 # ==============================================================================
-# 2. CORE FINANCIAL CONSTANTS & DEFAULT USERS
+# 2. UNIVERSAL FAMILY BANK CONSTANTS (SINGLE UNIFIED ACCOUNT)
 # ==============================================================================
-PRIMARY_INCOME = 23000   # Ajay's Monthly Income
-SPOUSE_INCOME = 15000    # Meenakshi's Monthly Income
-TOTAL_POOL = PRIMARY_INCOME + SPOUSE_INCOME  # ₹38,000 Total Pool
-STRICT_SAVINGS_TARGET = 15000                # ₹15,000 Separate Dream House + Medical Vault
-MAX_SPENDING_BUDGET = TOTAL_POOL - STRICT_SAVINGS_TARGET  # ₹23,000 Max Spending
+UNIVERSAL_FAMILY_POOL = 38000      # ₹38,000 Single Universal Parivaar Bank Pool (No Split!)
+STRICT_SAVINGS_VAULT = 15000       # ₹15,000 Locked Dream House + Medical Vault
+MAX_SPENDING_BUDGET = UNIVERSAL_FAMILY_POOL - STRICT_SAVINGS_VAULT  # ₹23,000 Spendable Limit
 
 CAP_FOOD = 7000
 CAP_RENT = 6000
@@ -44,9 +46,9 @@ CAP_MEDICAL_EAR = 3000
 PSYCHOLOGY_DAILY_REWARD_LIMIT = 200.0
 
 DEFAULT_USERS = [
-    ("Ajay", "52729211", "👑 Chief Admin & Primary Earner (₹23k)", 1, "👑"),
-    ("Meenakshi", "2345", "Partner Earner (₹15k)", 0, "👩‍💼"),
-    ("Ajeet", "3456", "Brother & Family Member", 0, "🧑‍🎓"),
+    ("Ajay", "52729211", "👑 Chief Admin • Universal Parivaar Account", 1, "👑"),
+    ("Meenakshi", "2345", "👩‍💼 Partner • Universal Parivaar Account", 0, "👩‍💼"),
+    ("Ajeet", "3456", "🧑‍🎓 Family Member • Universal Parivaar Account", 0, "🧑‍🎓"),
 ]
 
 CATEGORY_DESCRIPTIONS = {
@@ -55,6 +57,7 @@ CATEGORY_DESCRIPTIONS = {
         "ऑफिस लंच / टिफिन (Office Lunch)",
         "दूध, दही और ब्रेड (Milk & Curd)",
         "ताज़ी मछली / चिकन / अंडे (Home Non-Veg)",
+        "दाल मखनी / पनीर / संडे स्पेशल डिनर",
         "महीने का मेस / राशन बिल (Mess/Ration)",
         "शाम का समोसा / बाहर का नाश्ता (Avoid!)",
         "बाहर का चाउमीन / मोमोज / जंक फूड (Bad Expense!)",
@@ -66,6 +69,14 @@ CATEGORY_DESCRIPTIONS = {
         "मसाले, नमक और रसोई का सामान",
         "रसोई गैस सिलेंडर (LPG Refill)",
         "अन्य किराना सामान (Custom Grocery)...",
+    ],
+    "Shopping & Clothes (साड़ी, कपड़े और शॉपिंग)": [
+        "साड़ी / सूट / कुर्ती शॉपिंग (Saree & Ethnic)",
+        "फॉर्मल शर्ट / ट्राउज़र / ऑफिस वियर",
+        "जूते / सैंडल / बूट्स (Footwear)",
+        "स्किनकेयर / सनस्क्रीन / डेली केयर",
+        "त्योहार या परिवार की शॉपिंग",
+        "अन्य शॉपिंग खर्च...",
     ],
     "Room Rent (कमरे का किराया)": [
         "महीने का रूम रेंट (Monthly Room Rent)",
@@ -91,8 +102,8 @@ CATEGORY_DESCRIPTIONS = {
         "अन्य मेडिकल खर्च...",
     ],
     "Metro, Bus & Auto (आना-जाना)": [
-        "मेट्रो कार्ड रिचार्ज / बस टिकट (Metro/Bus)",
-        "शेयरिंग ई-रिक्शा / ऑटो (Necessary Auto)",
+        "DTC बस टिकट / मेट्रो रिचार्ज (Bus/Metro)",
+        "शेयरिंग ई-रिक्शा / ऑटो (Necessary E-Rickshaw)",
         "अकेले रिज़र्व ऑटो / कैब (फालतू खर्च - Avoid!)",
         "पेट्रोल / गाड़ी मेंटेनेंस",
         "अन्य ट्रैवल खर्च...",
@@ -103,7 +114,7 @@ CATEGORY_DESCRIPTIONS = {
         "अन्य बिल...",
     ],
     "Padhai, AI & English (पढ़ाई और करियर)": [
-        "Python / Data Engineering / AI कोर्स या किताब",
+        "Python / Power Query / Data Analysis कोर्स या किताब",
         "Spoken English प्रैक्टिस / नोटबुक",
         "फॉर्म फीस / सर्टिफिकेट",
         "अन्य पढ़ाई खर्च...",
@@ -114,74 +125,74 @@ CATEGORY_DESCRIPTIONS = {
         "ऑनलाइन फालतू शॉपिंग (Impulse Buy)",
         "अन्य गैर-ज़रूरी खर्च...",
     ],
-    "Other Zaroori Kharch (अन्य ज़रूरी)": [
-        "बाल कटवाना / साबुन / तेल (Daily Use)",
-        "घर का छोटा-मोटा ज़रूरी सामान",
-        "अन्य ज़रूरी खर्च...",
-    ],
 }
 
 # ==============================================================================
-# 3. 5 PREMIUM VIP THEMES + STRICT CSS LOCK (NO HIDDEN TEXT, NO GITHUB BUTTONS)
+# 3. 5 PREMIUM VIP THEMES + ANIMATED POSTER & BANK CARD CSS
 # ==============================================================================
 THEMES = {
-    "👑 Maharaja Gold & Obsidian (अजय एडमिन स्पेशल)": {
-        "bg_main": "radial-gradient(circle at top, #1f1705 0%, #07090f 100%)",
+    "👑 Maharaja Gold & Obsidian (अजय रॉयल स्पेशल)": {
+        "bg_main": "radial-gradient(circle at top, #231904 0%, #07090f 100%)",
         "card_bg": "#111827",
-        "card_border": "#f59e0b",
+        "card_border": "#fbbf24",
         "accent": "#fbbf24",
+        "accent_sec": "#00ff9d",
         "text_bright": "#ffffff",
         "text_sub": "#fde68a",
-        "banner_grad": "linear-gradient(135deg, #451a03 0%, #111827 65%, #064e3b 100%)",
+        "banner_grad": "linear-gradient(135deg, #451a03 0%, #111827 55%, #064e3b 100%)",
     },
-    "⚡ Emerald Wealth (पैसा और तरक्की ग्रीन)": {
+    "⚡ Emerald Cyber Bank (मॉडर्न नियो-बैंक ग्रीन)": {
         "bg_main": "radial-gradient(circle at top, #042f2e 0%, #060913 100%)",
         "card_bg": "#0f172a",
         "card_border": "#00ff9d",
         "accent": "#00ff9d",
+        "accent_sec": "#fbbf24",
         "text_bright": "#ffffff",
         "text_sub": "#a7f3d0",
-        "banner_grad": "linear-gradient(135deg, #064e3b 0%, #0f172a 65%, #1e1b4b 100%)",
+        "banner_grad": "linear-gradient(135deg, #064e3b 0%, #0f172a 55%, #1e1b4b 100%)",
     },
-    "🌊 Mindful Psychiatrist Blue (शांत और फोकस ब्लू)": {
+    "🌊 Mindful Sapphire Blue (शांत और फोकस ब्लू)": {
         "bg_main": "radial-gradient(circle at top, #0c192c 0%, #050811 100%)",
         "card_bg": "#0f172a",
         "card_border": "#38bdf8",
         "accent": "#38bdf8",
+        "accent_sec": "#f472b6",
         "text_bright": "#ffffff",
         "text_sub": "#bae6fd",
-        "banner_grad": "linear-gradient(135deg, #0c4a6e 0%, #0f172a 65%, #311042 100%)",
+        "banner_grad": "linear-gradient(135deg, #0c4a6e 0%, #0f172a 55%, #311042 100%)",
     },
     "🟣 Royal Amethyst (प्रीमियम पर्पल नाइट)": {
         "bg_main": "radial-gradient(circle at top, #2e1065 0%, #070510 100%)",
         "card_bg": "#131124",
         "card_border": "#c084fc",
         "accent": "#e879f9",
+        "accent_sec": "#38bdf8",
         "text_bright": "#ffffff",
         "text_sub": "#f5d0fe",
-        "banner_grad": "linear-gradient(135deg, #3b0764 0%, #131124 65%, #0f172a 100%)",
+        "banner_grad": "linear-gradient(135deg, #3b0764 0%, #131124 55%, #0f172a 100%)",
     },
     "🔥 Agni Hustle (जोश और अनुशासन)": {
         "bg_main": "radial-gradient(circle at top, #2a0a12 0%, #08070c 100%)",
         "card_bg": "#181018",
         "card_border": "#f97316",
         "accent": "#fb923c",
+        "accent_sec": "#fbbf24",
         "text_bright": "#ffffff",
         "text_sub": "#fed7aa",
-        "banner_grad": "linear-gradient(135deg, #431407 0%, #181018 65%, #3b0764 100%)",
+        "banner_grad": "linear-gradient(135deg, #431407 0%, #181018 55%, #3b0764 100%)",
     },
 }
 
 if "selected_theme" not in st.session_state:
-    st.session_state.selected_theme = "👑 Maharaja Gold & Obsidian (अजय एडमिन स्पेशल)"
+    st.session_state.selected_theme = "👑 Maharaja Gold & Obsidian (अजय रॉयल स्पेशल)"
 
 
 def apply_vip_theme(theme_name: str):
-    t = THEMES.get(theme_name, THEMES["👑 Maharaja Gold & Obsidian (अजय एडमिन स्पेशल)"])
+    t = THEMES.get(theme_name, THEMES["👑 Maharaja Gold & Obsidian (अजय रॉयल स्पेशल)"])
     st.markdown(
         f"""
         <style>
-        /* COMPLETELY HIDE STREAMLIT HEADER, GITHUB ICON, FORK, MANAGE APP & FOOTER */
+        /* HIDE STREAMLIT HEADER, GITHUB ICON, FORK, MANAGE APP & FOOTER */
         #MainMenu {{visibility: hidden !important; display: none !important;}}
         header {{visibility: hidden !important; height: 0px !important; display: none !important;}}
         footer {{visibility: hidden !important; display: none !important;}}
@@ -197,19 +208,17 @@ def apply_vip_theme(theme_name: str):
             visibility: hidden !important;
         }}
 
-        /* Global App Styling */
         .stApp {{
             background: {t['bg_main']} !important;
             color: {t['text_bright']} !important;
             font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
         }}
         .block-container {{
-            padding-top: 0.7rem !important;
+            padding-top: 0.6rem !important;
             padding-bottom: 4.5rem !important;
-            max-width: 760px !important;
+            max-width: 820px !important;
         }}
 
-        /* Force 100% High-Contrast Visible Text on All Labels & Elements */
         label, .stWidgetLabel, .stMarkdown p, .stMarkdown li, span, h1, h2, h3, h4, h5, h6 {{
             color: {t['text_bright']} !important;
         }}
@@ -218,7 +227,7 @@ def apply_vip_theme(theme_name: str):
             font-size: 0.85rem !important;
         }}
 
-        /* High-Contrast Dropdowns & Inputs */
+        /* Inputs & Selects */
         div[data-baseweb="select"] > div,
         div[data-baseweb="input"] > div,
         div[data-baseweb="base-input"],
@@ -248,36 +257,36 @@ def apply_vip_theme(theme_name: str):
         /* Metric Boxes */
         div[data-testid="stMetric"] {{
             background-color: {t['card_bg']} !important;
-            border: 1px solid {t['card_border']} !important;
+            border: 1.5px solid {t['card_border']} !important;
             border-radius: 14px !important;
             padding: 12px 14px !important;
-            box-shadow: 0 4px 14px rgba(0,0,0,0.45) !important;
+            box-shadow: 0 6px 16px rgba(0,0,0,0.5) !important;
         }}
         div[data-testid="stMetricLabel"] p,
         div[data-testid="stMetricLabel"] {{
             color: {t['text_sub']} !important;
             font-weight: 700 !important;
-            font-size: 0.84rem !important;
+            font-size: 0.83rem !important;
         }}
         div[data-testid="stMetricValue"] div,
         div[data-testid="stMetricValue"] {{
             color: {t['accent']} !important;
-            font-weight: 800 !important;
-            font-size: 1.35rem !important;
+            font-weight: 900 !important;
+            font-size: 1.32rem !important;
         }}
 
-        /* Mobile Navigation Tabs */
+        /* Tabs */
         button[data-baseweb="tab"] {{
             background-color: #1e293b !important;
             color: #cbd5e1 !important;
-            border-radius: 10px 10px 0 0 !important;
-            padding: 8px 10px !important;
+            border-radius: 11px 11px 0 0 !important;
+            padding: 8px 11px !important;
             margin-right: 3px !important;
             font-weight: 700 !important;
-            border: 1px solid rgba(255,255,255,0.12) !important;
+            border: 1px solid rgba(255,255,255,0.14) !important;
         }}
         button[data-baseweb="tab"][aria-selected="true"] {{
-            background-color: {t['accent']} !important;
+            background: linear-gradient(90deg, {t['accent']}, {t['accent_sec']}) !important;
             color: #020617 !important;
             font-weight: 900 !important;
         }}
@@ -286,41 +295,71 @@ def apply_vip_theme(theme_name: str):
             font-weight: 900 !important;
         }}
 
-        /* Compact Psychiatrist Daily Motivation Banner */
-        .psych-banner {{
+        /* Animated Royal Hero Poster */
+        @keyframes glowPulse {{
+            0% {{ box-shadow: 0 0 12px rgba(251, 191, 36, 0.35); }}
+            50% {{ box-shadow: 0 0 26px rgba(0, 255, 157, 0.55); }}
+            100% {{ box-shadow: 0 0 12px rgba(251, 191, 36, 0.35); }}
+        }}
+        @keyframes floatCrown {{
+            0%, 100% {{ transform: translateY(0px) rotate(0deg); }}
+            50% {{ transform: translateY(-5px) rotate(3deg); }}
+        }}
+        .hero-poster {{
             background: {t['banner_grad']};
-            border: 1.5px solid {t['accent']};
-            border-left: 7px solid {t['accent']};
-            border-radius: 14px;
-            padding: 10px 14px;
-            margin-bottom: 10px;
-            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+            border: 2px solid {t['accent']};
+            border-radius: 18px;
+            padding: 14px 18px;
+            margin-bottom: 12px;
+            animation: glowPulse 4s infinite ease-in-out;
+            position: relative;
+            overflow: hidden;
         }}
-        .psych-tag {{
-            font-size: 0.72rem;
-            text-transform: uppercase;
-            letter-spacing: 0.8px;
-            color: {t['accent']};
-            font-weight: 800;
-            margin-bottom: 2px;
-        }}
-        .psych-quote {{
-            font-size: 0.96rem;
-            font-weight: 700;
-            color: #ffffff;
-            line-height: 1.38;
+        .logo-badge {{
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 54px;
+            height: 54px;
+            border-radius: 16px;
+            background: linear-gradient(135deg, #fbbf24 0%, #d97706 100%);
+            color: #020617;
+            font-size: 1.9rem;
+            font-weight: 900;
+            box-shadow: 0 6px 18px rgba(251, 191, 36, 0.5);
+            animation: floatCrown 3s infinite ease-in-out;
+            margin-right: 14px;
+            flex-shrink: 0;
         }}
 
-        /* Daily < ₹200 Spend Dopamine Reward Card */
-        .reward-banner {{
-            background: linear-gradient(135deg, #065f46 0%, #047857 100%);
-            border: 2px solid #34d399;
-            border-radius: 14px;
-            padding: 10px 14px;
-            margin-bottom: 10px;
-            color: #ffffff;
-            font-size: 0.9rem;
-            box-shadow: 0 0 18px rgba(52, 211, 153, 0.25);
+        /* Formatted Motivation Poster Card */
+        .motivation-poster {{
+            background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 60%, #064e3b 100%);
+            border: 1.5px solid {t['accent_sec']};
+            border-left: 8px solid {t['accent']};
+            border-radius: 16px;
+            padding: 14px 16px;
+            margin-bottom: 12px;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+        }}
+
+        /* 3D Virtual Universal Bank Card */
+        .universal-bank-card {{
+            background: linear-gradient(135deg, #090d16 0%, #1e293b 50%, #3b2304 100%);
+            border: 2px solid #fbbf24;
+            border-radius: 20px;
+            padding: 18px 20px;
+            margin-bottom: 14px;
+            box-shadow: 0 12px 30px rgba(0,0,0,0.65);
+            position: relative;
+        }}
+        .bank-chip {{
+            width: 44px;
+            height: 32px;
+            border-radius: 7px;
+            background: linear-gradient(135deg, #fde68a 0%, #d97706 100%);
+            border: 1px solid #ffffff;
+            display: inline-block;
         }}
 
         /* VIP Cards */
@@ -330,40 +369,39 @@ def apply_vip_theme(theme_name: str):
             border-radius: 15px;
             padding: 14px 16px;
             margin-bottom: 12px;
-            box-shadow: 0 6px 18px rgba(0, 0, 0, 0.38);
+            box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
         }}
 
-        /* Admin Badge Card */
-        .admin-badge-bar {{
-            background: linear-gradient(90deg, #451a03 0%, #78350f 50%, #1e293b 100%);
+        /* Shopping Status Pills */
+        .pill-saved {{
+            background: rgba(16, 185, 129, 0.2);
+            border: 1.5px solid #10b981;
+            color: #6ee7b7 !important;
+            padding: 4px 10px;
+            border-radius: 999px;
+            font-weight: 800;
+            font-size: 0.8rem;
+        }}
+        .pill-over {{
+            background: rgba(239, 68, 68, 0.25);
+            border: 1.5px solid #ef4444;
+            color: #fca5a5 !important;
+            padding: 4px 10px;
+            border-radius: 999px;
+            font-weight: 800;
+            font-size: 0.8rem;
+        }}
+        .pill-pending {{
+            background: rgba(251, 191, 36, 0.18);
             border: 1.5px solid #fbbf24;
-            border-radius: 12px;
-            padding: 8px 14px;
-            margin-bottom: 10px;
-            font-size: 0.85rem;
-            font-weight: 700;
-            color: #fde68a;
+            color: #fde68a !important;
+            padding: 4px 10px;
+            border-radius: 999px;
+            font-weight: 800;
+            font-size: 0.8rem;
         }}
 
-        /* Red Alert Banner */
-        @keyframes pulseRed {{
-            0% {{ box-shadow: 0 0 0 0 rgba(255, 51, 102, 0.65); border-color: #ff3366; }}
-            70% {{ box-shadow: 0 0 0 10px rgba(255, 51, 102, 0); border-color: #fda4af; }}
-            100% {{ box-shadow: 0 0 0 0 rgba(255, 51, 102, 0); border-color: #ff3366; }}
-        }}
-        .red-alert-banner {{
-            background: linear-gradient(135deg, #7f1d1d 0%, #31102f 100%);
-            border: 2px solid #ff3366;
-            border-radius: 14px;
-            padding: 11px 14px;
-            margin-bottom: 10px;
-            color: #ffffff;
-            font-weight: 700;
-            font-size: 0.88rem;
-            animation: pulseRed 1.8s infinite;
-        }}
-
-        /* Instant UPI & Action Buttons */
+        /* UPI & Action Buttons */
         .upi-app-btn {{
             display: block;
             width: 100%;
@@ -371,11 +409,11 @@ def apply_vip_theme(theme_name: str):
             background: linear-gradient(90deg, #00ff9d 0%, #10b981 100%);
             color: #022c22 !important;
             font-weight: 900;
-            font-size: 0.98rem;
-            padding: 12px 14px;
+            font-size: 0.96rem;
+            padding: 11px 14px;
             border-radius: 12px;
             text-decoration: none !important;
-            margin: 6px 0;
+            margin: 5px 0;
             box-shadow: 0 5px 16px rgba(0, 255, 157, 0.35);
             border: 1.5px solid #ffffff;
         }}
@@ -386,27 +424,28 @@ def apply_vip_theme(theme_name: str):
             background: linear-gradient(90deg, #fbbf24 0%, #f59e0b 100%);
             color: #090d16 !important;
             font-weight: 900;
-            font-size: 0.95rem;
+            font-size: 0.94rem;
             padding: 11px 14px;
             border-radius: 12px;
             text-decoration: none !important;
-            margin: 6px 0;
+            margin: 5px 0;
             border: 1.5px solid #ffffff;
         }}
 
-        /* Buttons */
         div.stButton > button, div.stFormSubmitButton > button, div.stDownloadButton > button {{
             width: 100%;
             border-radius: 11px !important;
-            min-height: 45px !important;
+            min-height: 44px !important;
             font-weight: 800 !important;
             border: 1.5px solid {t['accent']} !important;
             background-color: #1e293b !important;
             color: #ffffff !important;
+            transition: all 0.2s ease-in-out !important;
         }}
         div.stButton > button:hover, div.stFormSubmitButton > button:hover, div.stDownloadButton > button:hover {{
             background-color: {t['accent']} !important;
             color: #020617 !important;
+            transform: translateY(-1px);
         }}
         div.stButton > button:hover p, div.stFormSubmitButton > button:hover p, div.stDownloadButton > button:hover p {{
             color: #020617 !important;
@@ -418,159 +457,54 @@ def apply_vip_theme(theme_name: str):
 
 
 # ==============================================================================
-# 4. SHORT PSYCHIATRIST DAILY MINDSET ENGINE (1-LINE HITS FOR 10+ YEARS)
+# 4. RICH FORMATTED PSYCHIATRIST MOTIVATION & POSTER ENGINE
 # ==============================================================================
-def get_short_psychiatrist_motivation():
+POSTER_SLIDES = [
+    {
+        "badge": "👑 PARIVAAR UNIVERSAL BANK 5.0",
+        "title": "एक परिवार • एक तिजोरी • एक बड़ा सपना!",
+        "sub": "₹38,000 Universal Pool में से ₹15,000 सीधा सपनों के घर और सेहत के लिए लॉक, और ₹23,000 में स्मार्ट गृहस्थी!",
+        "quote_hi": "“जब पति-पत्नी का लक्ष्य एक होता है, तो हर बचाया हुआ रुपया दोगुनी ताकत से काम करता है।”",
+        "psych_tip": "🧠 Psychiatrist Insight: पेमेंट करने से पहले सिर्फ 5 सेकंड रुककर 'Expected vs Actual' देखने से फालतू खर्च 68% तक तुरंत घट जाता है।",
+        "challenge": "🎯 आज का मिशन: खर्च ≤ ₹200 रखें + 15 मिनट Spoken English और Python/Power Query प्रैक्टिस करें!",
+    },
+    {
+        "badge": "🚀 CAREER & FLUENCY BOOSTER",
+        "title": "गलती से डरना छोड़ो — रफ़्तार पकड़ो!",
+        "sub": "Spoken English और Data Analytics/Python में रोज़ 1% सुधार आपको 1 साल में 100% आगे ले जाएगा।",
+        "quote_hi": "“अंग्रेज़ी बोलते समय अटकना कमजोरी नहीं है, यह सबूत है कि आप अपनी मातृभाषा के साथ एक नई स्किल सीख रहे हैं!”",
+        "psych_tip": "🧠 Brain Rewiring: जब भी कोडिंग या बातचीत में गलती हो, तो दिमाग से कहें—'यह मेरी ट्रेनिंग का हिस्सा है।' इससे डर तुरंत खत्म हो जाता है।",
+        "challenge": "🎯 आज का मिशन: शीशे के सामने 5 इंग्लिश वाक्य बोलें और 1 नया ऑटोमेशन/फॉर्मूला सीखें!",
+    },
+    {
+        "badge": "🏡 DREAM HOUSE BRICK BUILDER",
+        "title": "बाहर का ₹100 का जंक फूड = घर की 2 पक्की ईंटें (🧱)",
+        "sub": "हर बार जब आप बाहर के मोमोज/चाउमीन या रिज़र्व ऑटो को मना करते हैं, आपके अपने घर की दीवार और ऊँची होती है।",
+        "quote_hi": "“आज का थोड़ा सा संयम, कल पूरे परिवार को किराए के घर से अपने खुद के मकान की चाबी दिलाएगा।”",
+        "psych_tip": "🧠 Dopamine Shift: खर्च करने के बजाय 'बचत का प्रतिशत (%)' देखने से दिमाग को असली विजेता वाला डोपामाइन मिलता है।",
+        "challenge": "🎯 आज का मिशन: शॉपिंग या बाज़ार जाते समय 'Shopping Planner' में पहले Expected बजट दर्ज करें!",
+    },
+]
+
+
+def get_daily_poster_and_motivation(slide_offset: int = 0):
     anchor = date(2025, 1, 1)
     today = date.today()
     day_num = max(1, (today - anchor).days + 1)
-
-    tags = [
-        "🧠 Psychiatrist Note",
-        "🌿 शांत दिमाग, पक्का घर",
-        "💎 10-Second Control",
-        "🏡 ₹15K Dream House Rule",
-        "⚡ Winner Mindset",
-        "🛡️ फेलियर से जीत",
-    ]
-
-    short_quotes = [
-        "पेमेंट से पहले 1 गहरी सांस लें—आपका ₹15,000 का घर का सपना 5 मिनट के लालच से बहुत बड़ा है।",
-        "इंग्लिश बोलते समय या कोडिंग में गलती होना शर्म की बात नहीं, तरक्की की पहली सीढ़ी है!",
-        "ऑफिस की टेंशन को अपनी पढ़ाई से हराओ; रोज़ 45 मिनट Python/AI आपको नई ऊंचाई पर ले जाएगा।",
-        "बाहर का जंक फूड 2 मिनट का नकली सुख देता है, घर का खाना और बचत जीवन भर की सुरक्षा देती है।",
-        "आज बचाया गया हर ₹100 आपके अपने घर की 2 मजबूत ईंटें (🧱) हैं।",
-        "तुलना दिमाग की शांति छीनती है और अनुशासन किस्मत बदलता है। आज सिर्फ अपने लक्ष्य पर टिके रहें।",
-        "छोटी जीत (रोज़ ₹200 से कम खर्च + 5 नए English वाक्य) आपके दिमाग को विजेता बनाती है।",
-        "अजय, मीनाक्षी और अजीत की एकता ही इस परिवार की सबसे बड़ी दौलत है।",
-    ]
-
-    micro_goals = [
-        "✅ आज का नियम: खर्च ≤ ₹200 | 10 मिनट Spoken English | 30 मिनट Python/AI",
-        "✅ आज का नियम: ₹0 फालतू खर्च | हर पेमेंट से पहले एंट्री | शांत दिमाग",
-    ]
-
+    idx = (day_num + slide_offset) % len(POSTER_SLIDES)
+    slide = POSTER_SLIDES[idx]
     return {
         "day": day_num,
         "date_str": today.strftime("%d %b %Y"),
-        "tag": f"{tags[day_num % len(tags)]} • Day #{day_num}",
-        "quote": short_quotes[(day_num * 3 + (day_num // len(short_quotes))) % len(short_quotes)],
-        "goal": micro_goals[day_num % len(micro_goals)],
+        **slide,
     }
 
 
 # ==============================================================================
-# 5. 37 LAKH+ (3,750,000+) COMBINATORIAL SMART PROMPT ENGINE
+# 5. PERSISTENT DATABASE + AUTO JSON MIRROR SHIELD (NEVER LOSE RECORDS ON SLEEP)
 # ==============================================================================
-PROMPT_DOMAINS = {
-    "🗣️ Spoken English & Office Fluency": {
-        "topics": [
-            "Daily Office Meeting Sentences", "Boss & Client Email Writing", "Job Interview Self-Introduction",
-            "Phone Call English Conversation", "Salary Hike & Promotion Discussion", "Explaining Logistics & Data Reports",
-            "Overcoming Hesitation & Fear of Speaking", "Common Grammar Mistakes Fix", "Polite Disagreement in Office",
-            "Small Talk with Colleagues", "Presentation Opening & Closing Lines", "Asking Clarifying Questions",
-        ],
-        "contexts": [
-            "for a beginner who thinks in Hindi first", "for IT & Data Engineering interviews",
-            "when speaking to senior management", "for daily morning standup calls",
-            "when handling an angry client or delay update", "for confident body language and tone",
-            "with Hindi pronunciation and meaning", "for 5-minute mirror speaking practice",
-        ],
-    },
-    "🐍 Python, SQL, Excel & Data Engineering": {
-        "topics": [
-            "Python Pandas CSV/Excel Automation", "Playwright Web Scraping & Auto-Login", "SQL Window Functions (ROW_NUMBER, RANK)",
-            "Advanced Excel XLOOKUP & INDEX-MATCH", "Excel Power Query 1-Click Cleaning", "PySpark Big Data ETL Pipeline",
-            "Streamlit Interactive Dashboard Design", "Python Error Handling & Debugging", "Automating Daily Office MIS Reports",
-            "PostgreSQL Performance Tuning", "GitHub Portfolio Project Building", "API Data Fetching with Python Requests",
-        ],
-        "contexts": [
-            "with ready-to-run copy-paste code", "explained in simple Hinglish for beginners",
-            "for cracking ₹8L–₹15L LPA Data Engineer interviews", "to save 3 hours of manual office work daily",
-            "with real-world logistics & fleet dataset examples", "step-by-step from zero to production",
-            "with common errors and how to fix them", "for resume and LinkedIn showcase",
-        ],
-    },
-    "🤖 AI Learning, ChatGPT/Gemini & Tech News": {
-        "topics": [
-            "Latest AI Tools for Office Productivity", "Prompt Engineering Masterclass", "Building Free AI Agents with Python",
-            "Generative AI & LLM Latest Breakthroughs", "Using AI to Debug Python & SQL Code", "AI Resume & Interview Preparation",
-            "Free AI Tools for Spoken English Practice", "Automating Excel Formulas with AI", "Future Tech Jobs & AI Trends 2026-2030",
-            "Creating YouTube Shorts & Scripts with AI", "AI Data Analysis & Chart Generation", "Gemini API Free Integration",
-        ],
-        "contexts": [
-            "using 100% free tools without paying anything", "for working professionals studying at night",
-            "with latest 2026 tech industry news", "to double coding speed and accuracy",
-            "explained in simple Hindi with examples", "for career switch into Data & AI",
-        ],
-    },
-    "🍗 Chicken, Fish, Chinese, Korean & Desi Khana": {
-        "topics": [
-            "मसालेदार देसी चिकन करी (Dhaba Style Chicken Curry)", "सरसों वाली मछली करी और कुरकुरी फिश फ्राई (Fish Curry & Fry)",
-            "स्ट्रीट स्टाइल वेज/चिकन चाउमीन और मंचूरियन (Indo-Chinese)", "कोरियन स्पाइसी रैमेन नूडल्स और Tteokbokki (Korean Food)",
-            "झटपट कुकर मसाला तहरी और कुरकुरी भिंडी (Budget Desi Food)", "चिली चिकन और स्टीम्ड मोमोज़ विद रेड चटनी",
-            "हैदराबादी चिकन दम बिरयानी और अंडा करी", "कोरियन गार्लिक ब्रेड और क्रिस्पी फ्राइड चिकन",
-            "₹40 बजट हाई-प्रोटीन सोयाबीन, चना और पनीर भुर्जी", "ढाबा स्टाइल दाल तड़का और जीरा राइस",
-        ],
-        "contexts": [
-            "घर के बेसिक मसालों से कम बजट में बनाने की विधि", "15 से 20 मिनट में कुकर या कड़ाही में झटपट रेसिपी",
-            "होटल और रेस्टोरेंट जैसा असली स्वाद घर पर लाने के सीक्रेट टिप्स", "संडे स्पेशल फैमिली डिनर के लिए स्टेप-बाय-स्टेप",
-            "कम तेल और ज़्यादा प्रोटीन के साथ सेहतमंद तरीके से", "शुरुआती लोगों (Beginners) के लिए एकदम आसान भाषा में",
-        ],
-    },
-    "🔥 Failure Recovery, Office Politics & Mindset": {
-        "topics": [
-            "अंग्रेज़ी बोलते समय अटकने या मज़ाक बनने के डर को कैसे खत्म करें",
-            "कोडिंग या इंटरव्यू में बार-बार फेल होने के बाद दोगुनी ताकत से वापसी कैसे करें",
-            "ऑफिस में गलती होने या बॉस की डांट के बाद दिमाग को शांत और मजबूत कैसे रखें",
-            "ऑफिस पॉलिटिक्स से बचते हुए अपने काम और प्रमोशन पर फोकस कैसे करें",
-            "थकान और आलस को हराकर रोज़ रात को पढ़ने की आदत कैसे डालें",
-            "पैसों की तंगी में भी परिवार का हौसला और खुशी कैसे बनाए रखें",
-        ],
-        "contexts": [
-            "सच्ची प्रेरक कहानी और साइकोलॉजिकल समाधान के साथ", "दिमाग का तनाव 5 मिनट में खत्म करने की प्रैक्टिकल ट्रिक",
-            "असफलता को अपनी सबसे बड़ी ताकत बनाने के 5 नियम", "आत्मविश्वास (Self-Confidence) तुरंत वापस पाने का तरीका",
-        ],
-    },
-    "✈️ Travel, Vlogs, Cartoons & Hindi Kahaniyaan": {
-        "topics": [
-            "कम बजट (Under ₹3,000) में दिल्ली के पास वीकेंड फैमिली ट्रैवल प्लान", "पहाड़ों और नदियों की खूबसूरत ट्रैवल व्लॉगिंग गाइड",
-            "रोमांचक और सस्पेंस से भरी प्रेरणादायक हिंदी कहानी", "पंचतंत्र और तेनालीराम की बुद्धिमत्ता वाली कहानियाँ",
-            "भारतीय क्लासिक कार्टून और एनिमेशन स्टोरीज़", "दुनिया के अजूबे और रहस्यमयी जगहों की जानकारी",
-        ],
-        "contexts": [
-            "पूरे परिवार के मनोरंजन और ज्ञान के लिए", "मूड फ्रेश करने और नई ऊर्जा पाने के लिए",
-            "रोचक तथ्यों और सटीक जानकारी के साथ", "आसान और दिलचस्प कहानी की शैली में",
-        ],
-    },
-}
-
-PROMPT_FORMATS = [
-    "स्टेप-बाय-स्टेप आसान हिंदी गाइड",
-    "प्रैक्टिकल उदाहरण और शॉर्टकट ट्रिक्स के साथ",
-    "सवाल-जवाब और डेली प्रैक्टिस प्लान के रूप में",
-    "एक्सपर्ट टिप्स और शुरुआती गलतियों से बचने के तरीके",
-    "5 मिनट में समझ आने वाले बुलेट पॉइंट्स में",
-]
-
-
-def generate_batch_of_smart_prompts(domain_key: str, seed_val: int, count: int = 8) -> list:
-    dom = PROMPT_DOMAINS[domain_key]
-    topics = dom["topics"]
-    contexts = dom["contexts"]
-    results = []
-    for i in range(count):
-        t = topics[(seed_val + i * 3) % len(topics)]
-        c = contexts[(seed_val + i * 5) % len(contexts)]
-        f = PROMPT_FORMATS[(seed_val + i * 7) % len(PROMPT_FORMATS)]
-        results.append(f"{t} — {c} ({f})")
-    return results
-
-
-# ==============================================================================
-# 6. DATABASE ENGINE (USERS, EXPENSES, VAULT, CAREER)
-# ==============================================================================
-DB_FILE = "parivaar_vip_v3.db"
+DB_FILE = "parivaar_vip_v5.db"
+BACKUP_MIRROR_FILE = "parivaar_auto_mirror_v5.json"
 
 
 def get_db_engine():
@@ -655,6 +589,23 @@ def init_db():
             conn.execute(
                 text(
                     """
+                    CREATE TABLE IF NOT EXISTS shopping_planner (
+                        id SERIAL PRIMARY KEY,
+                        trip_name TEXT NOT NULL,
+                        trip_budget REAL NOT NULL,
+                        item_name TEXT NOT NULL,
+                        category TEXT NOT NULL,
+                        expected_amt REAL NOT NULL,
+                        actual_amt REAL DEFAULT 0,
+                        status TEXT DEFAULT 'Pending',
+                        created_at TEXT NOT NULL
+                    );
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
                     CREATE TABLE IF NOT EXISTS career_progress (
                         skill_key TEXT PRIMARY KEY,
                         completed INTEGER DEFAULT 0,
@@ -695,10 +646,6 @@ def init_db():
                 (u, p, r, adm, av),
             )
         c.execute("UPDATE app_users SET is_admin = 1, avatar = '👑' WHERE username = 'Ajay'")
-        c.execute(
-            "UPDATE app_users SET password = ? WHERE username = 'Ajay' AND password = '1234'",
-            ("52729211",),
-        )
 
         c.execute(
             """
@@ -737,6 +684,21 @@ def init_db():
         )
         c.execute(
             """
+            CREATE TABLE IF NOT EXISTS shopping_planner (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trip_name TEXT NOT NULL,
+                trip_budget REAL NOT NULL,
+                item_name TEXT NOT NULL,
+                category TEXT NOT NULL,
+                expected_amt REAL NOT NULL,
+                actual_amt REAL DEFAULT 0,
+                status TEXT DEFAULT 'Pending',
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        c.execute(
+            """
             CREATE TABLE IF NOT EXISTS career_progress (
                 skill_key TEXT PRIMARY KEY,
                 completed INTEGER DEFAULT 0,
@@ -749,6 +711,105 @@ def init_db():
 
 
 init_db()
+
+
+def export_full_backup_json() -> str:
+    """Exports all tables into a single JSON string for instant backup & auto-mirroring."""
+    data = {
+        "exported_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "expenses": fetch_all_expenses_df().drop(columns=["parsed_date"], errors="ignore").to_dict(orient="records"),
+        "vault_deposits": fetch_vault_df().to_dict(orient="records"),
+        "shopping_planner": fetch_shopping_df().to_dict(orient="records"),
+        "career_progress": get_career_progress(),
+    }
+    json_str = json.dumps(data, ensure_ascii=False, indent=2)
+    try:
+        with open(BACKUP_MIRROR_FILE, "w", encoding="utf-8") as f:
+            f.write(json_str)
+    except Exception:
+        pass
+    return json_str
+
+
+def restore_from_backup_json(json_str: str) -> bool:
+    """Restores expenses, vault deposits, and shopping items from a JSON backup."""
+    try:
+        payload = json.loads(json_str)
+        conn = get_sqlite_conn()
+        cur = conn.cursor()
+
+        for row in payload.get("expenses", []):
+            cur.execute(
+                """
+                INSERT OR IGNORE INTO expenses (
+                    id, timestamp, date_only, month_year, logged_by, spent_by, category,
+                    item_name, description, payment_mode, upi_app, need_level,
+                    amount, is_bad_expense, upi_id, notes
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    row.get("id"),
+                    row.get("timestamp", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+                    row.get("date_only", date.today().strftime("%Y-%m-%d")),
+                    row.get("month_year", datetime.now().strftime("%Y-%m")),
+                    row.get("logged_by", "Ajay"),
+                    row.get("spent_by", "Ajay"),
+                    row.get("category", "Food & Mess (खाना, चिकन/मछली और टिफिन)"),
+                    row.get("item_name", "Item"),
+                    row.get("description", ""),
+                    row.get("payment_mode", "UPI"),
+                    row.get("upi_app", "Google Pay (GPay)"),
+                    row.get("need_level", "बहुत ज़रूरी (Essential)"),
+                    float(row.get("amount", 0.0)),
+                    int(row.get("is_bad_expense", 0)),
+                    row.get("upi_id", ""),
+                    row.get("notes", ""),
+                ),
+            )
+
+        for row in payload.get("vault_deposits", []):
+            cur.execute(
+                """
+                INSERT OR IGNORE INTO vault_deposits (
+                    id, timestamp, month_year, deposited_by, vault_bucket, amount, notes
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    row.get("id"),
+                    row.get("timestamp", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+                    row.get("month_year", datetime.now().strftime("%Y-%m")),
+                    row.get("deposited_by", "Ajay"),
+                    row.get("vault_bucket", "🏡 Dream House (सपनों का घर फंड)"),
+                    float(row.get("amount", 0.0)),
+                    row.get("notes", ""),
+                ),
+            )
+
+        for row in payload.get("shopping_planner", []):
+            cur.execute(
+                """
+                INSERT OR IGNORE INTO shopping_planner (
+                    id, trip_name, trip_budget, item_name, category, expected_amt, actual_amt, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    row.get("id"),
+                    row.get("trip_name", "Market Shopping"),
+                    float(row.get("trip_budget", 6000.0)),
+                    row.get("item_name", "Item"),
+                    row.get("category", "Shopping & Clothes (साड़ी, कपड़े और शॉपिंग)"),
+                    float(row.get("expected_amt", 0.0)),
+                    float(row.get("actual_amt", 0.0)),
+                    row.get("status", "Pending"),
+                    row.get("created_at", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+                ),
+            )
+
+        conn.commit()
+        conn.close()
+        return True
+    except Exception:
+        return False
 
 
 def get_all_users_dict() -> dict:
@@ -868,6 +929,7 @@ def add_expense_to_db(
         )
         conn.commit()
         conn.close()
+    export_full_backup_json()
 
 
 def update_expense_in_db(expense_id: int, spent_by: str, category: str, item_name: str, amount: float, is_bad: bool, notes: str):
@@ -894,6 +956,7 @@ def update_expense_in_db(expense_id: int, spent_by: str, category: str, item_nam
         )
         conn.commit()
         conn.close()
+    export_full_backup_json()
 
 
 def delete_expense_from_db(expense_id: int):
@@ -906,6 +969,7 @@ def delete_expense_from_db(expense_id: int):
         conn.execute("DELETE FROM expenses WHERE id = ?", (int(expense_id),))
         conn.commit()
         conn.close()
+    export_full_backup_json()
 
 
 def fetch_all_expenses_df() -> pd.DataFrame:
@@ -921,6 +985,101 @@ def fetch_all_expenses_df() -> pd.DataFrame:
         if not df.empty:
             df["parsed_date"] = pd.to_datetime(df["timestamp"], errors="coerce").dt.date
         return df
+    except Exception:
+        return pd.DataFrame()
+
+
+# ==============================================================================
+# 6. SHOPPING PLANNER DB FUNCTIONS (EXPECTED VS ACTUAL TRACKER)
+# ==============================================================================
+def add_shopping_item_db(trip_name: str, trip_budget: float, item_name: str, category: str, expected_amt: float, actual_amt: float = 0.0):
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    status = "Completed" if actual_amt > 0 else "Pending"
+    engine = get_db_engine()
+    if engine:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO shopping_planner (trip_name, trip_budget, item_name, category, expected_amt, actual_amt, status, created_at)
+                    VALUES (:tn, :tb, :inm, :cat, :exp, :act, :st, :ca)
+                    """
+                ),
+                {
+                    "tn": trip_name, "tb": float(trip_budget), "inm": item_name, "cat": category,
+                    "exp": float(expected_amt), "act": float(actual_amt), "st": status, "ca": now_str,
+                },
+            )
+    else:
+        conn = get_sqlite_conn()
+        conn.execute(
+            """
+            INSERT INTO shopping_planner (trip_name, trip_budget, item_name, category, expected_amt, actual_amt, status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (trip_name, float(trip_budget), item_name, category, float(expected_amt), float(actual_amt), status, now_str),
+        )
+        conn.commit()
+        conn.close()
+    export_full_backup_json()
+
+
+def update_shopping_actual_db(item_id: int, actual_amt: float, expected_amt: float = None):
+    status = "Completed" if actual_amt > 0 else "Pending"
+    engine = get_db_engine()
+    if engine:
+        with engine.begin() as conn:
+            if expected_amt is not None:
+                conn.execute(
+                    text("UPDATE shopping_planner SET actual_amt = :act, expected_amt = :exp, status = :st WHERE id = :id"),
+                    {"act": float(actual_amt), "exp": float(expected_amt), "st": status, "id": int(item_id)},
+                )
+            else:
+                conn.execute(
+                    text("UPDATE shopping_planner SET actual_amt = :act, status = :st WHERE id = :id"),
+                    {"act": float(actual_amt), "st": status, "id": int(item_id)},
+                )
+    else:
+        conn = get_sqlite_conn()
+        if expected_amt is not None:
+            conn.execute(
+                "UPDATE shopping_planner SET actual_amt = ?, expected_amt = ?, status = ? WHERE id = ?",
+                (float(actual_amt), float(expected_amt), status, int(item_id)),
+            )
+        else:
+            conn.execute(
+                "UPDATE shopping_planner SET actual_amt = ?, status = ? WHERE id = ?",
+                (float(actual_amt), status, int(item_id)),
+            )
+        conn.commit()
+        conn.close()
+    export_full_backup_json()
+
+
+def delete_shopping_item_db(item_id: int):
+    engine = get_db_engine()
+    if engine:
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM shopping_planner WHERE id = :id"), {"id": int(item_id)})
+    else:
+        conn = get_sqlite_conn()
+        conn.execute("DELETE FROM shopping_planner WHERE id = ?", (int(item_id),))
+        conn.commit()
+        conn.close()
+    export_full_backup_json()
+
+
+def fetch_shopping_df() -> pd.DataFrame:
+    try:
+        engine = get_db_engine()
+        if engine:
+            with engine.connect() as conn:
+                return pd.read_sql(text("SELECT * FROM shopping_planner ORDER BY id DESC"), conn)
+        else:
+            conn = get_sqlite_conn()
+            df = pd.read_sql_query("SELECT * FROM shopping_planner ORDER BY id DESC", conn)
+            conn.close()
+            return df
     except Exception:
         return pd.DataFrame()
 
@@ -948,6 +1107,7 @@ def add_vault_deposit(deposited_by: str, vault_bucket: str, amount: float, notes
         )
         conn.commit()
         conn.close()
+    export_full_backup_json()
 
 
 def delete_vault_deposit_from_db(vault_id: int):
@@ -960,6 +1120,7 @@ def delete_vault_deposit_from_db(vault_id: int):
         conn.execute("DELETE FROM vault_deposits WHERE id = ?", (int(vault_id),))
         conn.commit()
         conn.close()
+    export_full_backup_json()
 
 
 def fetch_vault_df(month_year: str = None) -> pd.DataFrame:
@@ -1032,8 +1193,228 @@ def set_career_progress(skill_key: str, completed: bool):
         conn.close()
 
 
+# Auto-recover from local mirror if DB was wiped on sleep
+if fetch_all_expenses_df().empty and os.path.exists(BACKUP_MIRROR_FILE):
+    try:
+        with open(BACKUP_MIRROR_FILE, "r", encoding="utf-8") as bf:
+            restore_from_backup_json(bf.read())
+    except Exception:
+        pass
+
+
 # ==============================================================================
-# 7. FAST MULTI-APP UPI ENGINE & ZERO-AD NATIVE WEBAPP GENERATOR
+# 7. IN-APP MULTI-ANGLE YOUTUBE SHORTS ENGINE + AI 360 OVERVIEW (NO INSTAGRAM!)
+# ==============================================================================
+FALLBACK_VIDEO_POOL = {
+    "food": ["CO2c3s2nB50", "w7Wj2_T0b9A", "3m7B92p2R7k", "AD9h3d7X6tI"],
+    "tech": ["UrsmFxEIp5k", "vmEHCJofslg", "Vl0H-qTclOg", "0aeZX1l4JT4"],
+    "english": ["jul2urONzOQ", "mEsleV16qdo", "JwSS70SZdyM", "HXV3zeQKqGY"],
+    "default": ["CO2c3s2nB50", "w7Wj2_T0b9A", "UrsmFxEIp5k", "jul2urONzOQ"],
+}
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def search_youtube_video_id(query_text: str, fallback_idx: int = 0) -> str:
+    """Fetches a real playable YouTube video/short ID for any query so it plays INSIDE the app."""
+    try:
+        q_enc = urllib.parse.quote_plus(query_text)
+        url = f"https://www.youtube.com/results?search_query={q_enc}"
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                "Accept-Language": "en-IN,en;q=0.9,hi;q=0.8",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=4.5) as resp:
+            html = resp.read().decode("utf-8", errors="ignore")
+        ids = re.findall(r'"videoId":"([a-zA-Z0-9_-]{11})"', html)
+        unique_ids = []
+        for v in ids:
+            if v not in unique_ids:
+                unique_ids.append(v)
+        if unique_ids:
+            return unique_ids[min(fallback_idx, len(unique_ids) - 1)]
+    except Exception:
+        pass
+    q_low = query_text.lower()
+    if any(k in q_low for k in ["python", "excel", "sql", "code", "ai", "data"]):
+        pool = FALLBACK_VIDEO_POOL["tech"]
+    elif any(k in q_low for k in ["english", "interview", "speak", "office"]):
+        pool = FALLBACK_VIDEO_POOL["english"]
+    else:
+        pool = FALLBACK_VIDEO_POOL["food"]
+    return pool[fallback_idx % len(pool)]
+
+
+def build_multi_angle_ai_and_shorts(topic_query: str):
+    """
+    Given ANY search topic (e.g. 'Dal Makhani', 'Chicken Curry', 'Python Power Query', 'Saree Shopping'),
+    returns 4 distinct angles:
+      1. कैसे बनती है / कैसे सीखें (Full Step-by-Step Method)
+      2. कितनी देर में बनेगी / फास्ट ट्रिक (Time & Speed Hack)
+      3. कितने की आएगी / बजट और बचत (Cost & Budget Breakdown)
+      4. प्रो सीक्रेट / असली स्वाद या करियर फायदा (Pro Tips & Mistakes to Avoid)
+    """
+    clean_t = topic_query.strip()
+    q_low = clean_t.lower()
+
+    is_tech_or_career = any(
+        w in q_low
+        for w in ["python", "excel", "power query", "sql", "english", "interview", "ai", "data", "job", "coding", "office"]
+    )
+
+    if is_tech_or_career:
+        angles = [
+            {
+                "badge": "📘 Angle 1: कैसे सीखें (Step-by-Step विधि)",
+                "title": f"{clean_t} — शून्य से स्टेप-बाय-स्टेप कैसे करें?",
+                "ai_summary": f"**{clean_t}** को सीखने का सबसे आसान तरीका: पहले इसके 3 मुख्य बेसिक कमांड/वाक्य समझें, फिर अपने ऑफिस के किसी 1 असली काम पर इसे लगाकर देखें। रटने के बजाय प्रैक्टिकल करने से यह 3 गुना तेज़ याद रहता है।",
+                "yt_query": f"{clean_t} step by step tutorial in hindi shorts",
+            },
+            {
+                "badge": "⏱️ Angle 2: कितना समय लगेगा (Quick 5-Min Trick)",
+                "title": f"{clean_t} — कम समय में तेज़ी से मास्टर करने की शॉर्टकट ट्रिक",
+                "ai_summary": f"**समय की बचत:** रोज़ सिर्फ **15 से 20 मिनट** प्रैक्टिस करने पर आप **7 से 10 दिनों** में {clean_t} का इस्तेमाल ऑफिस में धड़ल्ले से कर सकते हैं। घंटों का मैनुअल काम सिर्फ 2 मिनट में होगा!",
+                "yt_query": f"{clean_t} fast shortcut tricks hindi youtube shorts",
+            },
+            {
+                "badge": "💰 Angle 3: खर्च बनाम सैलरी फायदा (Cost & ROI)",
+                "title": f"{clean_t} — ₹0 खर्च में सीखें और सैलरी कितनी बढ़ेगी?",
+                "ai_summary": f"**लागत: ₹0 (100% Free)।** महंगे पेड कोर्स की ज़रूरत नहीं! इस एक स्किल को अपने रिज्यूमे और काम में जोड़ने से डेटा एनालिटिक्स/ऑपरेशंस में आपकी वैल्यू **30% से 60% तक** बढ़ जाती है।",
+                "yt_query": f"{clean_t} career salary growth tips hindi shorts",
+            },
+            {
+                "badge": "🔥 Angle 4: प्रो टिप्स और आम गलतियाँ (Pro Secrets)",
+                "title": f"{clean_t} — इंटरव्यू और ऑफिस के लिए टॉप सीक्रेट टिप्स",
+                "ai_summary": f"**प्रो सीक्रेट:** 90% लोग सिर्फ वीडियो देखते हैं, खुद टाइप या बोलकर प्रैक्टिस नहीं करते। आज नीचे दिया गया चौथा वीडियो देखकर तुरंत 2 उदाहरण खुद ट्राई करें!",
+                "yt_query": f"{clean_t} interview tips and mistakes hindi shorts",
+            },
+        ]
+    else:
+        angles = [
+            {
+                "badge": "🍲 Angle 1: कैसे बनती है (Step-by-Step Recipe)",
+                "title": f"{clean_t} — घर पर एकदम स्वादिष्ट कैसे बनाएं?",
+                "ai_summary": f"**{clean_t} बनाने की विधि:** घर के बेसिक मसालों (अदरक-लहसुन पेस्ट, ताज़ा टमाटर-प्याज और धीमी आंच पर भुना मसाला) से इसे बनाएं। सही तड़का लगाने से घर पर ही रेस्टोरेंट से 10 गुना शुद्ध और ताज़ा स्वाद मिलता है।",
+                "yt_query": f"{clean_t} kaise banate hain ghar par easy recipe hindi shorts",
+            },
+            {
+                "badge": "⏱️ Angle 2: कितनी देर में बनेगी (Time & Pressure Cooker Hack)",
+                "title": f"{clean_t} — कम समय (15-20 मिनट) में झटपट बनाने की ट्रिक",
+                "ai_summary": f"**बनने का समय:** कुकर या वन-पॉट ट्रिक से यह सिर्फ **15 से 25 मिनट** में तैयार हो जाती है! अगर पहले से तैयारी (चॉपिंग/भिगोना) कर लें, तो ऑफिस से आने के बाद भी फटाफट बन जाएगी।",
+                "yt_query": f"{clean_t} jhatpat 10 minute mein kaise banaye cooker trick shorts",
+            },
+            {
+                "badge": "💰 Angle 3: कितने की आएगी (Home Cost vs Market Price)",
+                "title": f"{clean_t} — घर पर बनाने में कितने रुपये लगेंगे बनाम होटल का बिल?",
+                "ai_summary": f"**बजट गणित:** बाहर होटल/रेस्टोरेंट में जो **{clean_t}** ₹250 से ₹450 की मिलती है, वही घर पर पूरे परिवार के लिए सिर्फ **₹60 से ₹110 की लागत** में भरपूर और सेहतमंद बन जाती है! यानी सीधे **₹200+ की बचत (4 नई ईंटें 🧱)**!",
+                "yt_query": f"{clean_t} street food price vs home budget recipe hindi shorts",
+            },
+            {
+                "badge": "🌶️ Angle 4: ढाबा/होटल का सीक्रेट स्वाद (Pro Secret Touch)",
+                "title": f"{clean_t} — होटल और ढाबे वाले आखिरी में क्या सीक्रेट मिलाते हैं?",
+                "ai_summary": f"**सीक्रेट टिप:** गैस बंद करने से 2 मिनट पहले कसूरी मेथी को हथेली से रगड़कर डालना और थोड़ा सा देसी घी/मक्खन का तड़का लगाना इसके स्वाद को दोगुना कर देता है।",
+                "yt_query": f"{clean_t} dhaba secret tips restaurant taste hindi shorts",
+            },
+        ]
+
+    for idx, ang in enumerate(angles):
+        ang["video_id"] = search_youtube_video_id(ang["yt_query"], fallback_idx=idx)
+    return angles
+
+
+def render_in_app_youtube_short(video_id: str, title: str, badge: str, height: int = 390):
+    """Renders an embedded YouTube player directly inside the Streamlit app (Supports Shorts & Videos)."""
+    embed_html = f"""
+    <div style="background:#0f172a; border:2px solid #fbbf24; border-radius:16px; padding:10px; color:#fff; font-family:sans-serif; box-shadow:0 8px 20px rgba(0,0,0,0.5);">
+        <div style="font-size:11px; font-weight:800; color:#00ff9d; text-transform:uppercase; margin-bottom:4px;">{badge}</div>
+        <div style="font-size:13px; font-weight:700; color:#ffffff; margin-bottom:8px; line-height:1.3;">{title}</div>
+        <div style="position:relative; width:100%; height:{height}px; border-radius:12px; overflow:hidden; border:1px solid #334155;">
+            <iframe
+                src="https://www.youtube.com/embed/{video_id}?rel=0&modestbranding=1&playsinline=1"
+                style="width:100%; height:100%; border:0;"
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                allowfullscreen>
+            </iframe>
+        </div>
+    </div>
+    """
+    components.html(embed_html, height=height + 85)
+
+
+# ==============================================================================
+# 8. 37 LAKH+ SMART PROMPT ENGINE
+# ==============================================================================
+PROMPT_DOMAINS = {
+    "🍲 देसी खाना, दाल मखनी, चिकन, मछली & चाइनीज़/कोरियन": {
+        "topics": [
+            "Dal Makhani (दाल मखनी — ढाबा स्टाइल)", "Masala Chicken Curry (मसालेदार देसी चिकन करी)",
+            "Mustard Fish Curry & Crispy Fish Fry (मछली करी और फ्राई)", "Chana Aloo Curry & High-Protein Sattu Drink",
+            "Egg Curry & Paneer Bhurji (अंडा करी और पनीर भुर्जी)", "Potato-Besan Cutlets & Crispy Bhindi Fry",
+            "Garhwali Chua & Pahadi Recipes (गढ़वाली चूआ और पहाड़ी डिश)", "Street Style Veg/Chicken Chowmein & Momos",
+            "Korean Spicy Ramen & Tteokbokki (कोरियन नूडल्स)", "15-Minute Cooker Masala Tehri & Daliya Khichdi",
+        ],
+        "contexts": [
+            "कैसे बनती है, कितनी देर में बनेगी और कितने की आएगी", "घर के बेसिक मसालों से ₹80 के बजट में होटल जैसा स्वाद",
+            "ऑफिस टिफिन और संडे स्पेशल फैमिली डिनर के लिए", "हाई-प्रोटीन और कम तेल में सेहतमंद तरीके से",
+        ],
+    },
+    "🗣️ Spoken English, Telecalling & Office Fluency": {
+        "topics": [
+            "Client Telecalling & Customer Handling in English", "Daily Office Meeting & Reporting Sentences",
+            "Self-Introduction for Customer Service & Data Jobs", "Handling Angry Clients Politely on Phone",
+            "Boss & Senior Management Email Writing", "Overcoming Hesitation While Speaking English",
+        ],
+        "contexts": [
+            "with Hindi meaning and mirror practice sentences", "for confident telecalling and executive interviews",
+            "when you think in Hindi first and want instant fluency", "with 5 ready-to-use professional templates",
+        ],
+    },
+    "🐍 Python, Excel Power Query & Data Analytics": {
+        "topics": [
+            "Excel Power Query — Combining Multiple Files in 1 Click", "Advanced Excel XLOOKUP, Pivot Tables & MIS Dashboards",
+            "Python Pandas — Automating Daily Logistics & Fleet Reports", "Playwright Web Automation & Data Scraping",
+            "SQL Queries for Data Analyst Interviews", "Building Interactive Apps with Python & Streamlit",
+        ],
+        "contexts": [
+            "step-by-step in simple Hinglish with practical examples", "to save 2 hours of manual office work every day",
+            "for cracking Data Analyst & MIS Executive jobs", "with copy-paste formulas and zero-error tips",
+        ],
+    },
+    "🛍️ Smart Shopping, Saree/Formal Styling & Budget Hacks": {
+        "topics": [
+            "Saree, Anarkali & Kurti Budget Shopping Guide in Delhi", "Formal Office Wear (Emerald/Navy Shirts & Trousers) Styling",
+            "Daily Skincare Routine (Sunscreen PA+++ & Aloe Vera) on Budget", "Monthly Grocery & Sabzi Mandi ₹2,000 Saving Hacks",
+        ],
+        "contexts": [
+            "कम बजट में प्रीमियम और रॉयल लुक पाने के टिप्स", "Expected vs Actual बजट में 25% पैसा बचाने की ट्रिक",
+        ],
+    },
+}
+
+PROMPT_FORMATS = [
+    "कैसे करें + कितना समय + कितना खर्च (360° गाइड)",
+    "स्टेप-बाय-स्टेप प्रैक्टिकल ट्रिक्स के साथ",
+    "5 मिनट में समझ आने वाले उदाहरणों के साथ",
+]
+
+
+def generate_batch_of_smart_prompts(domain_key: str, seed_val: int, count: int = 8) -> list:
+    dom = PROMPT_DOMAINS[domain_key]
+    topics = dom["topics"]
+    contexts = dom["contexts"]
+    results = []
+    for i in range(count):
+        t = topics[(seed_val + i * 3) % len(topics)]
+        c = contexts[(seed_val + i * 5) % len(contexts)]
+        f = PROMPT_FORMATS[(seed_val + i * 7) % len(PROMPT_FORMATS)]
+        results.append(f"{t} — {c} ({f})")
+    return results
+
+
+# ==============================================================================
+# 9. FAST UPI QR & ZERO-AD NATIVE WEBAPP GENERATOR
 # ==============================================================================
 def generate_upi_links_and_qr(upi_id: str, payee_name: str, amount: float, note: str):
     clean_upi = (upi_id or "").strip()
@@ -1083,10 +1464,6 @@ def generate_upi_links_and_qr(upi_id: str, payee_name: str, amount: float, note:
 
 
 def generate_zero_ad_fullscreen_app_file() -> bytes:
-    """
-    Generates a 100% Ad-Free, Fullscreen Native-Style App file (.html) with embedded
-    PWA manifest and full-screen iframe wrapper so the user gets zero ads forever.
-    """
     html_code = """<!DOCTYPE html>
 <html lang="hi">
 <head>
@@ -1094,9 +1471,8 @@ def generate_zero_ad_fullscreen_app_file() -> bytes:
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="theme-color" content="#07090f">
-<title>Parivaar VIP 4.0 (Zero-Ad Native App)</title>
+<title>Parivaar VIP 5.0 (Zero-Ad Universal App)</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body, html { width: 100%; height: 100%; background: #07090f; color: #fff; font-family: sans-serif; overflow: hidden; }
@@ -1124,7 +1500,7 @@ def generate_zero_ad_fullscreen_app_file() -> bytes:
 <body>
   <div id="setupBox">
     <div class="card">
-      <h2 style="color:#fbbf24; margin-bottom:8px;">👑 Parivaar VIP 4.0</h2>
+      <h2 style="color:#fbbf24; margin-bottom:8px;">👑 Parivaar VIP 5.0</h2>
       <p style="font-size:13px; color:#fde68a; margin-bottom:10px;">
         100% Free & Zero-Ads Native App Launcher.<br>नीचे अपने Streamlit ऐप का लिंक सिर्फ 1 बार पेस्ट करें:
       </p>
@@ -1160,46 +1536,69 @@ def generate_zero_ad_fullscreen_app_file() -> bytes:
 
 
 # ==============================================================================
-# 8. STRICT TAB-ISOLATED LOGIN (RE-LOGIN REQUIRED ON NEW TAB / PASTE LINK)
+# 10. LOGIN SCREEN WITH ROYAL ANIMATED LOGO & POSTER
 # ==============================================================================
 if len(st.query_params) > 0:
     st.query_params.clear()
 
 if "authenticated_user" not in st.session_state:
     st.session_state.authenticated_user = None
+if "poster_slide_idx" not in st.session_state:
+    st.session_state.poster_slide_idx = 0
+if "willpower_xp" not in st.session_state:
+    st.session_state.willpower_xp = 120
 
 apply_vip_theme(st.session_state.selected_theme)
 USERS_DICT = get_all_users_dict()
 
 
-def render_login_screen():
-    mot = get_short_psychiatrist_motivation()
+def render_hero_poster_and_motivation():
+    poster = get_daily_poster_and_motivation(st.session_state.poster_slide_idx)
     st.markdown(
         f"""
-        <div class="psych-banner">
-            <div class="psych-tag">{mot['tag']} • {mot['date_str']}</div>
-            <div class="psych-quote">“{mot['quote']}”</div>
+        <div class="hero-poster">
+            <div style="display:flex; align-items:center;">
+                <div class="logo-badge">👑</div>
+                <div>
+                    <div style="font-size:0.72rem; font-weight:900; color:#00ff9d; letter-spacing:1px;">
+                        {poster['badge']} • DAY #{poster['day']} ({poster['date_str']})
+                    </div>
+                    <div style="font-size:1.22rem; font-weight:900; color:#ffffff; margin-top:2px;">
+                        {poster['title']}
+                    </div>
+                    <div style="font-size:0.84rem; color:#fde68a; margin-top:2px;">
+                        {poster['sub']}
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="motivation-poster">
+            <div style="font-size:0.75rem; font-weight:900; color:#fbbf24; text-transform:uppercase; letter-spacing:0.8px;">
+                ✨ आज का पावर मोटिवेशन पोस्टर (Daily Mindset Poster)
+            </div>
+            <div style="font-size:1.02rem; font-weight:800; color:#ffffff; margin:6px 0; line-height:1.4;">
+                {poster['quote_hi']}
+            </div>
+            <div style="font-size:0.84rem; color:#a7f3d0; background:rgba(0,0,0,0.35); padding:7px 10px; border-radius:10px; margin-top:4px;">
+                {poster['psych_tip']}
+            </div>
+            <div style="font-size:0.82rem; color:#fde68a; font-weight:800; margin-top:6px;">
+                {poster['challenge']}
+            </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    st.markdown(
-        """
-        <div class="vip-card" style="text-align:center;">
-            <h2 style="margin-bottom:4px; color:#fbbf24;">👑 Parivaar VIP 4.0 Super-App</h2>
-            <p style="font-size:0.88rem; margin-top:2px;">
-                🔒 <b>Secure Tab Protection:</b> नए टैब या फोन में लिंक खोलने पर पासवर्ड अनिवार्य है।
-            </p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+
+def render_login_screen():
+    render_hero_poster_and_motivation()
 
     with st.form("strict_login_form"):
+        st.markdown("#### 🔐 Parivaar Universal Bank & Super-App लॉगिन")
         user_options = list(USERS_DICT.keys())
         selected_user = st.selectbox(
-            "👤 अपना अकाउंट चुनें (Select User ID)",
+            "👤 अपना नाम चुनें (Universal Family Account)",
             options=user_options,
             format_func=lambda u: f"{USERS_DICT[u]['avatar']} {u} — {USERS_DICT[u]['role']}",
         )
@@ -1208,7 +1607,7 @@ def render_login_screen():
             type="password",
             placeholder="अपना पासवर्ड लिखें...",
         )
-        login_btn = st.form_submit_button("🔓 सुरक्षित लॉगिन करें (Unlock App)")
+        login_btn = st.form_submit_button("🔓 सुपर-ऐप अनलॉक करें (Unlock Universal Account)")
 
         if login_btn:
             expected_pw = USERS_DICT.get(selected_user, {}).get("password", "")
@@ -1225,7 +1624,7 @@ if not st.session_state.authenticated_user or st.session_state.authenticated_use
 
 
 # ==============================================================================
-# 9. LOGGED-IN USER & ADMIN PROFILE STATUS
+# 11. UNIVERSAL PARIVAAR BANK CALCULATIONS (NO SPLIT - 100% UNIFIED)
 # ==============================================================================
 current_user = st.session_state.authenticated_user
 current_user_info = USERS_DICT[current_user]
@@ -1243,6 +1642,7 @@ df_month = (
 )
 df_all_vault = fetch_vault_df()
 df_month_vault = fetch_vault_df(current_month_str)
+df_shopping = fetch_shopping_df()
 
 if not df_month.empty:
     total_spent_month = float(df_month["amount"].sum())
@@ -1251,30 +1651,34 @@ if not df_month.empty:
     bad_spent_month = float(df_month[df_month["is_bad_expense"] == 1]["amount"].sum())
     food_spent_month = float(df_month[df_month["category"].str.startswith("Food", na=False)]["amount"].sum())
     rent_spent_month = float(df_month[df_month["category"].str.startswith("Room Rent", na=False)]["amount"].sum())
-    home_transfer_month = float(df_month[df_month["category"].str.startswith("Home Transfer", na=False)]["amount"].sum())
-    ear_medical_month = float(df_month[df_month["category"].str.startswith("Ear Medical", na=False)]["amount"].sum())
 else:
     total_spent_month = 0.0
     spent_today = 0.0
     bad_spent_month = 0.0
     food_spent_month = 0.0
     rent_spent_month = 0.0
-    home_transfer_month = 0.0
-    ear_medical_month = 0.0
 
 vault_saved_this_month = float(df_month_vault["amount"].sum()) if not df_month_vault.empty else 0.0
 vault_saved_all_time = float(df_all_vault["amount"].sum()) if not df_all_vault.empty else 0.0
 
 days_in_month = calendar.monthrange(today_obj.year, today_obj.month)[1]
 days_left = max(1, days_in_month - today_obj.day + 1)
-remaining_monthly_budget = max(0.0, MAX_SPENDING_BUDGET - total_spent_month)
-daily_safe_limit = remaining_monthly_budget / days_left
 
-# Top Bar: Theme + Profile + Quick Download + Logout
-top_c1, top_c2, top_c3 = st.columns([2.2, 1.5, 0.9])
+# Universal Bank Math
+remaining_spendable_balance = max(0.0, MAX_SPENDING_BUDGET - total_spent_month)
+budget_overflow = max(0.0, total_spent_month - MAX_SPENDING_BUDGET)
+effective_monthly_savings = max(0.0, STRICT_SAVINGS_VAULT - budget_overflow)
+live_total_bank_balance = remaining_spendable_balance + effective_monthly_savings
+daily_safe_limit = remaining_spendable_balance / days_left
+
+spend_utilization_pct = min(100.0, (total_spent_month / MAX_SPENDING_BUDGET) * 100.0) if MAX_SPENDING_BUDGET > 0 else 0.0
+saving_health_pct = (effective_monthly_savings / STRICT_SAVINGS_VAULT) * 100.0 if STRICT_SAVINGS_VAULT > 0 else 100.0
+
+# Top Bar Controls
+top_c1, top_c2, top_c3, top_c4 = st.columns([2.0, 1.2, 1.0, 0.8])
 with top_c1:
     chosen_theme = st.selectbox(
-        "🎨 VIP थीम चुनें (Theme)",
+        "🎨 VIP थीम (Theme)",
         options=list(THEMES.keys()),
         index=list(THEMES.keys()).index(st.session_state.selected_theme),
     )
@@ -1282,71 +1686,275 @@ with top_c1:
         st.session_state.selected_theme = chosen_theme
         st.rerun()
 with top_c2:
-    role_badge = "👑 SUPER ADMIN" if is_admin else "👤 MEMBER"
-    st.markdown(
-        f"<div style='padding-top:26px; font-weight:900; font-size:0.9rem;'>{current_user_info['avatar']} {current_user} <span style='color:#fbbf24;'>({role_badge})</span></div>",
-        unsafe_allow_html=True,
-    )
+    st.markdown("<div style='padding-top:18px;'></div>", unsafe_allow_html=True)
+    if st.button("🖼️ अगला पोस्टर"):
+        st.session_state.poster_slide_idx += 1
+        st.rerun()
 with top_c3:
+    st.markdown("<div style='padding-top:18px;'></div>", unsafe_allow_html=True)
+    if st.button(f"💪 संकल्प (+XP: {st.session_state.willpower_xp})"):
+        st.session_state.willpower_xp += 10
+        st.balloons()
+with top_c4:
     st.markdown("<div style='padding-top:18px;'></div>", unsafe_allow_html=True)
     if st.button("🔒 लॉगआउट"):
         st.session_state.authenticated_user = None
         st.rerun()
 
-if is_admin:
-    st.markdown(
-        """
-        <div class="admin-badge-bar">
-            👑 <b>Ajay Singh Rawat — Master Admin Mode:</b> गलत एंट्री Edit/Delete करने, नए यूज़र बनाने और पासवर्ड बदलने का 100% कंट्रोल सक्रिय है।
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+# Render Animated Logo, Moving Poster & Motivation Card
+render_hero_poster_and_motivation()
 
-# Short Psychiatrist Daily Motivation Banner
-mot = get_short_psychiatrist_motivation()
+# ==============================================================================
+# 12. UNIVERSAL PARIVAAR 3D BANK CARD & LIVE SPENDING vs SAVING METER
+# ==============================================================================
 st.markdown(
     f"""
-    <div class="psych-banner">
-        <div class="psych-tag">{mot['tag']} • {mot['date_str']}</div>
-        <div class="psych-quote">“{mot['quote']}”</div>
-        <div style="font-size:0.78rem; color:#fde68a; margin-top:4px; font-weight:700;">{mot['goal']}</div>
+    <div class="universal-bank-card">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+            <div>
+                <div style="font-size:0.72rem; color:#fde68a; font-weight:800; letter-spacing:1.2px;">
+                    🏦 PARIVAAR UNIVERSAL WEALTH BANK (एक ही संयुक्त खाता)
+                </div>
+                <div style="font-size:1.15rem; font-weight:900; color:#ffffff;">
+                    {current_user_info['avatar']} AJAY & MEENAKSHI UNIVERSAL ACCOUNT
+                </div>
+            </div>
+            <div class="bank-chip"></div>
+        </div>
+        <div style="display:grid; grid-template-columns: repeat(4, 1fr); gap:8px; background:rgba(0,0,0,0.42); padding:10px 12px; border-radius:12px; border:1px solid rgba(255,255,255,0.12);">
+            <div>
+                <div style="font-size:0.7rem; color:#cbd5e1;">कुल मासिक पूल</div>
+                <div style="font-size:1.05rem; font-weight:900; color:#fbbf24;">₹{UNIVERSAL_FAMILY_POOL:,.0f}</div>
+            </div>
+            <div>
+                <div style="font-size:0.7rem; color:#cbd5e1;">अभी खर्च के लिए बचा</div>
+                <div style="font-size:1.05rem; font-weight:900; color:#00ff9d;">₹{remaining_spendable_balance:,.0f}</div>
+            </div>
+            <div>
+                <div style="font-size:0.7rem; color:#cbd5e1;">इस महीने कुल खर्च</div>
+                <div style="font-size:1.05rem; font-weight:900; color:#f87171;">₹{total_spent_month:,.0f} ({spend_utilization_pct:.0f}%)</div>
+            </div>
+            <div>
+                <div style="font-size:0.7rem; color:#cbd5e1;">सुरक्षित बचत (Vault)</div>
+                <div style="font-size:1.05rem; font-weight:900; color:#38bdf8;">₹{effective_monthly_savings:,.0f} ({saving_health_pct:.0f}%)</div>
+            </div>
+        </div>
+        <div style="display:flex; justify-content:space-between; font-size:0.78rem; color:#fde68a; margin-top:8px; font-weight:700;">
+            <span>💳 A/C: 5000-PARIVAAR-2026</span>
+            <span>🛡️ आज की सुरक्षित खर्च सीमा: ₹{daily_safe_limit:,.0f}/दिन</span>
+            <span>🧱 कुल तिजोरी ईंटें: {int((vault_saved_all_time + effective_monthly_savings) // 50)} Bricks</span>
+        </div>
     </div>
     """,
     unsafe_allow_html=True,
 )
 
-# Daily < ₹200 Spend Dopamine Notification
-if spent_today <= PSYCHOLOGY_DAILY_REWARD_LIMIT:
-    extra_saved = max(0.0, daily_safe_limit - spent_today)
-    bricks_won = max(1, int(extra_saved // 50))
+# ==============================================================================
+# 13. MAIN 7 INTERACTIVE SUPER-TABS
+# ==============================================================================
+tab_shop, tab_pay, tab_yt_ai, tab_vault, tab_ledger, tab_comeback, tab_admin = st.tabs(
+    [
+        "🛍️ शॉपिंग प्लानर (Expected vs Actual)",
+        "⚡ तेज़ UPI & खर्च",
+        "🎬 In-App Shorts & AI Search",
+        "🏦 बैंक पासबुक & ₹15K तिजोरी",
+        "📊 हिसाब & AI ऑडिट",
+        "🔥 जीत की कहानियाँ & Games",
+        "👑 Admin & Backup Shield",
+    ]
+)
+
+# ==============================================================================
+# TAB 1: SMART SHOPPING PLANNER (EXPECTED VS ACTUAL BUDGET TRACKER)
+# ==============================================================================
+with tab_shop:
     st.markdown(
-        f"""
-        <div class="reward-banner">
-            🏆 <b>बहुत बढ़िया {current_user}!</b> आज खर्च सिर्फ <b>₹{spent_today:,.0f}</b> (₹200 से कम) है!
-            आपने आज <b>₹{extra_saved:,.0f} एक्स्ट्रा बचाकर</b> अपने घर की <b>+{bricks_won} नई ईंटें (🧱)</b> पक्की कर लीं!
+        """
+        <div class="vip-card">
+            <h4 style="margin:0; color:#00ff9d;">🛍️ स्मार्ट शॉपिंग & बाज़ार प्लानर (Expected vs Actual Live Tracker)</h4>
+            <p style="margin:4px 0 0 0; font-size:0.86rem;">
+                शॉपिंग जाने से पहले अपना <b>कुल बजट (जैसे ₹6,000)</b> और सामान की <b>Expected कीमत (जैसे साड़ी ₹2,000)</b> डालें।
+                खरीदते समय जैसे ही <b>Actual (असली कीमत)</b> डालेंगे, आपको तुरंत <b>% Utilization, बचत/ज़्यादा खर्च का हाईलाइट और बचा हुआ बजट</b> दिखेगा!
+            </p>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-# ==============================================================================
-# 10. MAIN 7 SUPER-TABS
-# ==============================================================================
-tab_pay, tab_vault, tab_ledger, tab_prompts, tab_media, tab_comeback, tab_admin = st.tabs(
-    [
-        "⚡ तेज़ UPI",
-        "🏡 ₹15K तिजोरी",
-        "📊 हिसाब & AI",
-        "🚀 37 लाख+ Prompts",
-        "🍗 फूड, ट्रैवल & कार्टून",
-        "🔥 जीत की कहानियाँ & Games",
-        "👑 Admin & Free App",
-    ]
-)
+    if "active_trip_budget" not in st.session_state:
+        st.session_state.active_trip_budget = (
+            float(df_shopping["trip_budget"].iloc[0]) if not df_shopping.empty else 6000.0
+        )
+    if "active_trip_name" not in st.session_state:
+        st.session_state.active_trip_name = (
+            str(df_shopping["trip_name"].iloc[0]) if not df_shopping.empty else "त्योहार / बाज़ार शॉपिंग लिस्ट"
+        )
+
+    sc1, sc2, sc3 = st.columns([1.6, 1.1, 1.1])
+    with sc1:
+        trip_name_in = st.text_input("🛒 शॉपिंग लिस्ट का नाम", value=st.session_state.active_trip_name)
+        st.session_state.active_trip_name = trip_name_in
+    with sc2:
+        trip_budget_in = st.number_input(
+            "💰 कुल शॉपिंग बजट (Expected Limit ₹)",
+            min_value=100.0,
+            max_value=200000.0,
+            value=float(st.session_state.active_trip_budget),
+            step=500.0,
+        )
+        st.session_state.active_trip_budget = trip_budget_in
+    with sc3:
+        st.markdown("<div style='padding-top:24px;'></div>", unsafe_allow_html=True)
+        if st.button("✨ सैंपल शॉपिंग लिस्ट लोड करें (₹6000)"):
+            sample_items = [
+                ("साड़ी (Saree - Festival/Party)", "Shopping & Clothes (साड़ी, कपड़े और शॉपिंग)", 2000.0, 1750.0),
+                ("फॉर्मल शर्ट और ट्राउज़र", "Shopping & Clothes (साड़ी, कपड़े और शॉपिंग)", 1500.0, 0.0),
+                ("जूते / फॉर्मल बूट्स", "Shopping & Clothes (साड़ी, कपड़े और शॉपिंग)", 1200.0, 0.0),
+                ("किराना और घर का सामान", "Sabzi & Kirana (सब्ज़ी और राशन)", 1300.0, 0.0),
+            ]
+            for s_name, s_cat, s_exp, s_act in sample_items:
+                add_shopping_item_db(trip_name_in, trip_budget_in, s_name, s_cat, s_exp, s_act)
+            st.rerun()
+
+    # Add New Expected Item Form
+    with st.form("add_shopping_item_form", clear_on_submit=True):
+        st.markdown("##### ➕ नई Expected शॉपिंग आइटम जोड़ें")
+        sh_c1, sh_c2, sh_c3, sh_c4 = st.columns([1.6, 1.3, 1.0, 1.0])
+        with sh_c1:
+            sh_item = st.text_input("सामान का नाम (जैसे: साड़ी, कुर्ती, राशन, जूते)", placeholder="जैसे: साड़ी (Saree)")
+        with sh_c2:
+            sh_cat = st.selectbox("श्रेणी (Category)", options=list(CATEGORY_DESCRIPTIONS.keys()), index=2)
+        with sh_c3:
+            sh_exp = st.number_input("Expected कीमत (₹)", min_value=10.0, max_value=100000.0, value=2000.0, step=100.0)
+        with sh_c4:
+            sh_act = st.number_input("Actual खर्च (₹ - अभी या बाद में)", min_value=0.0, max_value=100000.0, value=0.0, step=50.0)
+
+        if st.form_submit_button("🛒 शॉपिंग लिस्ट में जोड़ें"):
+            if sh_item.strip():
+                add_shopping_item_db(trip_name_in, trip_budget_in, sh_item.strip(), sh_cat, sh_exp, sh_act)
+                st.success(f"✅ '{sh_item}' (Expected: ₹{sh_exp:,.0f}) शॉपिंग प्लानर में जुड़ गया!")
+                st.rerun()
+            else:
+                st.warning("कृपया सामान का नाम लिखें!")
+
+    df_shopping = fetch_shopping_df()
+    if not df_shopping.empty:
+        total_expected_items = float(df_shopping["expected_amt"].sum())
+        total_actual_spent = float(df_shopping["actual_amt"].sum())
+        completed_df = df_shopping[df_shopping["actual_amt"] > 0]
+        expected_of_completed = float(completed_df["expected_amt"].sum()) if not completed_df.empty else 0.0
+
+        remaining_from_trip_budget = trip_budget_in - total_actual_spent
+        trip_utilized_pct = (total_actual_spent / trip_budget_in) * 100.0 if trip_budget_in > 0 else 0.0
+        net_variance_on_bought = expected_of_completed - total_actual_spent
+
+        # Live Summary Cards with Percentage & Highlight
+        sm1, sm2, sm3, sm4 = st.columns(4)
+        sm1.metric("कुल शॉपिंग बजट", f"₹{trip_budget_in:,.0f}", f"Planned: ₹{total_expected_items:,.0f}")
+        sm2.metric("Actual खर्च हुआ", f"₹{total_actual_spent:,.0f}", f"{trip_utilized_pct:.1f}% Utilized")
+        sm3.metric(
+            "अब कितना बजट बचा है?",
+            f"₹{remaining_from_trip_budget:,.0f}",
+            f"{max(0.0, 100.0 - trip_utilized_pct):.1f}% Left",
+        )
+        sm4.metric(
+            "खरीदे गए सामान पर बचत",
+            f"₹{net_variance_on_bought:+,.0f}",
+            "Bachat 🎉" if net_variance_on_bought >= 0 else "Over Budget 🚨",
+        )
+
+        # Visual Progress Bar for Overall Shopping Utilization
+        bar_val = min(1.0, max(0.0, total_actual_spent / trip_budget_in)) if trip_budget_in > 0 else 0.0
+        st.progress(
+            bar_val,
+            text=f"📊 कुल शॉपिंग बजट Utilization: ₹{total_actual_spent:,.0f} / ₹{trip_budget_in:,.0f} ({trip_utilized_pct:.1f}% इस्तेमाल हो गया • ₹{remaining_from_trip_budget:,.0f} बाकी है)",
+        )
+
+        st.markdown("#### 📋 आपकी शॉपिंग लिस्ट (यहीं से Actual कीमत अपडेट करें और % देखें):")
+        for _, row in df_shopping.iterrows():
+            r_id = int(row["id"])
+            r_name = str(row["item_name"])
+            r_cat = str(row["category"])
+            r_exp = float(row["expected_amt"])
+            r_act = float(row["actual_amt"])
+
+            item_pct_of_exp = (r_act / r_exp * 100.0) if r_exp > 0 else 0.0
+            item_pct_of_trip = (r_act / trip_budget_in * 100.0) if trip_budget_in > 0 else 0.0
+            diff = r_exp - r_act
+
+            if r_act == 0:
+                badge_html = f'<span class="pill-pending">⏳ लेना बाकी है (Expected: ₹{r_exp:,.0f})</span>'
+            elif diff > 0:
+                badge_html = f'<span class="pill-saved">🎉 ₹{diff:,.0f} बचाए! ({item_pct_of_exp:.0f}% of Expected | कुल बजट का {item_pct_of_trip:.1f}%)</span>'
+            elif diff == 0:
+                badge_html = f'<span class="pill-saved">✅ फिक्स बजट में मिला (100% Utilized | कुल बजट का {item_pct_of_trip:.1f}%)</span>'
+            else:
+                badge_html = f'<span class="pill-over">🚨 ₹{abs(diff):,.0f} ज़्यादा लगा! ({item_pct_of_exp:.0f}% of Expected | कुल बजट का {item_pct_of_trip:.1f}%)</span>'
+
+            st.markdown(
+                f"""
+                <div class="vip-card" style="padding:10px 14px; margin-bottom:8px;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px;">
+                        <div>
+                            <span style="font-size:1.02rem; font-weight:900; color:#fbbf24;">🛍️ {r_name}</span>
+                            <span style="font-size:0.78rem; color:#cbd5e1;"> ({r_cat.split('(')[0]})</span>
+                        </div>
+                        <div>{badge_html}</div>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            ic1, ic2, ic3, ic4 = st.columns([1.2, 1.2, 1.3, 0.8])
+            with ic1:
+                new_exp_v = st.number_input(
+                    f"Expected (₹) #{r_id}",
+                    min_value=10.0,
+                    value=r_exp,
+                    step=100.0,
+                    key=f"sh_exp_{r_id}",
+                )
+            with ic2:
+                new_act_v = st.number_input(
+                    f"Actual खर्च (₹) #{r_id}",
+                    min_value=0.0,
+                    value=r_act,
+                    step=50.0,
+                    key=f"sh_act_{r_id}",
+                )
+            with ic3:
+                st.markdown("<div style='padding-top:24px;'></div>", unsafe_allow_html=True)
+                if st.button("💾 Actual सेव + बैंक खाते में जोड़ें", key=f"sh_save_{r_id}"):
+                    update_shopping_actual_db(r_id, new_act_v, new_exp_v)
+                    if new_act_v > 0:
+                        add_expense_to_db(
+                            logged_by=current_user,
+                            spent_by="Universal Family Account",
+                            category=r_cat,
+                            item_name=f"{r_name} (Shopping)",
+                            description=f"Expected ₹{new_exp_v:,.0f} vs Actual ₹{new_act_v:,.0f}",
+                            payment_mode="UPI",
+                            upi_app="Google Pay (GPay)",
+                            need_level="बहुत ज़रूरी (Essential)",
+                            amount=new_act_v,
+                            is_bad_expense=(new_act_v > new_exp_v * 1.25),
+                            upi_id="",
+                            notes=f"Shopping Planner: Expected ₹{new_exp_v:,.0f}, Actual ₹{new_act_v:,.0f}",
+                        )
+                    st.success(f"✅ '{r_name}' अपडेट हो गया और मुख्य पासबुक में भी जुड़ गया!")
+                    st.rerun()
+            with ic4:
+                st.markdown("<div style='padding-top:24px;'></div>", unsafe_allow_html=True)
+                if st.button("🗑️ हटाएं", key=f"sh_del_{r_id}"):
+                    delete_shopping_item_db(r_id)
+                    st.rerun()
+    else:
+        st.info("💡 अभी आपकी शॉपिंग लिस्ट खाली है। ऊपर **'✨ सैंपल शॉपिंग लिस्ट लोड करें (₹6000)'** दबाएं या नया आइटम जोड़ें!")
+
 
 # ==============================================================================
-# TAB 1: ULTRA-FAST PRE-PAYMENT & INSTANT UPI LAUNCHER
+# TAB 2: ULTRA-FAST DAILY EXPENSE & INSTANT UPI LAUNCHER
 # ==============================================================================
 with tab_pay:
     st.caption("⚡ **1-Tap तेज़ बटन (दबाते ही रकम और कारण अपने-आप भर जाएगा):**")
@@ -1355,10 +1963,10 @@ with tab_pay:
         st.session_state.qf_cat = "Food & Mess (खाना, चिकन/मछली और टिफिन)"
         st.session_state.qf_amt = 15.0
         st.session_state.qf_desc = "सुबह की चाय / बिस्किट (Morning Tea)"
-    if q2.button("🚇 ₹40 मेट्रो"):
+    if q2.button("🚌 ₹30 बस/ई-रिक्शा"):
         st.session_state.qf_cat = "Metro, Bus & Auto (आना-जाना)"
-        st.session_state.qf_amt = 40.0
-        st.session_state.qf_desc = "मेट्रो कार्ड रिचार्ज / बस टिकट (Metro/Bus)"
+        st.session_state.qf_amt = 30.0
+        st.session_state.qf_desc = "शेयरिंग ई-रिक्शा / ऑटो (Necessary E-Rickshaw)"
     if q3.button("🥛 ₹66 दूध"):
         st.session_state.qf_cat = "Food & Mess (खाना, चिकन/मछली और टिफिन)"
         st.session_state.qf_amt = 66.0
@@ -1374,9 +1982,8 @@ with tab_pay:
 
     c_who, c_cat = st.columns(2)
     with c_who:
-        spent_by_options = list(USERS_DICT.keys()) + ["Joint Family (पूरा परिवार)"]
-        def_who_idx = spent_by_options.index(current_user) if current_user in spent_by_options else 0
-        spent_by_val = st.selectbox("👤 किसने खर्च किया? (Spent By)", options=spent_by_options, index=def_who_idx)
+        spent_by_options = ["Universal Family Account (संयुक्त परिवार खाता)"] + list(USERS_DICT.keys())
+        spent_by_val = st.selectbox("🏦 किस खाते/सदस्य द्वारा खर्च हुआ?", options=spent_by_options, index=0)
     with c_cat:
         selected_category = st.selectbox("📂 खर्च की श्रेणी (Expense Category)", options=cat_list, index=cat_idx)
 
@@ -1401,7 +2008,7 @@ with tab_pay:
             custom_item = st.text_input(
                 "🏷️ सामान का नाम (चाहें तो लिखें)",
                 value="" if "Custom" in selected_desc or "अन्य" in selected_desc else selected_desc,
-                placeholder="जैसे: आलू-भिंडी / चिकन / ऑटो किराया",
+                placeholder="जैसे: दाल मखनी सामान / साड़ी / सब्ज़ी",
             )
         with fc2:
             amount_val = st.number_input(
@@ -1429,16 +2036,19 @@ with tab_pay:
             upi_id_input = st.text_input(
                 "🆔 दुकानदार की UPI ID (ऑप्शनल)",
                 value="",
-                placeholder="खाली छोड़ने पर सीधा स्कैनर खुलेगा",
+                placeholder="खाली छोड़ने पर सीधा ऐप खुलेगा",
             )
 
         is_bad_chk = st.checkbox("🚨 यह गैर-ज़रूरी / फालतू खर्च (Bad Expense) है", value=auto_bad)
         notes_val = st.text_input("📌 नोट (Optional)", placeholder="कोई खास बात...")
 
         bricks_eq = max(1, int(amount_val // 50))
-        st.caption(f"🧱 **मनोवैज्ञानिक सच:** `₹{amount_val:,.0f}` = आपके सपनों के घर की **{bricks_eq} ईंटें**।")
+        pct_of_monthly = (amount_val / MAX_SPENDING_BUDGET) * 100.0
+        st.caption(
+            f"🧱 **लाइव बैंक असर:** `₹{amount_val:,.0f}` आपके मासिक खर्च बजट का **{pct_of_monthly:.1f}%** है (= सपनों के घर की **{bricks_eq} ईंटें**)."
+        )
 
-        submit_tx = st.form_submit_button("🚀 सेव करें और तुरंत GPay / PhonePe खोलें")
+        submit_tx = st.form_submit_button("🚀 पासबुक में सेव करें और तुरंत GPay / PhonePe खोलें")
 
         if submit_tx:
             final_item_name = custom_item.strip() or selected_desc
@@ -1480,15 +2090,7 @@ with tab_pay:
     upi_bundle = generate_upi_links_and_qr(active_upi, active_item, active_amt, active_item)
 
     if rec:
-        st.success(f"✅ **सेव हो गया!** ₹{rec['amount']:,.0f} — **{rec['item']}** (`{rec['spent_by']}`)")
-
-    st.markdown("#### ⚡ 1-Tap फास्ट UPI पेमेंट और स्कैनर")
-    if upi_bundle["has_real_upi"]:
-        pref_url = upi_bundle["prefilled_links"].get(active_app, "upi://pay")
-        st.markdown(
-            f'<a href="{pref_url}" class="upi-app-btn">🚀 {active_app} में सीधे ₹{active_amt:,.0f} पेमेंट खोलें</a>',
-            unsafe_allow_html=True,
-        )
+        st.success(f"✅ **यूनिवर्सल बैंक पासबुक में सेव हो गया!** ₹{rec['amount']:,.0f} — **{rec['item']}**")
 
     u_c1, u_c2, u_c3 = st.columns(3)
     u_c1.markdown(
@@ -1506,15 +2108,129 @@ with tab_pay:
 
 
 # ==============================================================================
-# TAB 2: SEPARATE ₹15,000 DREAM HOUSE + EAR MEDICAL VAULT
+# TAB 3: IN-APP YOUTUBE SHORTS (4 ANGLES) + AI 360 OVERVIEW + 37L PROMPTS
+# ==============================================================================
+with tab_yt_ai:
+    st.markdown(
+        """
+        <div class="vip-card">
+            <h4 style="margin:0; color:#fbbf24;">🎬 In-App Multi-Angle YouTube Shorts & 🤖 AI 360° Overview (No Instagram!)</h4>
+            <p style="margin:4px 0 0 0; font-size:0.86rem;">
+                अब कोई भी डिश (जैसे <b>Dal Makhani</b>), कोडिंग (<b>Python / Power Query</b>) या <b>Spoken English</b> टॉपिक चुनें या लिखें।
+                सबसे ऊपर <b>AI Overview</b> आएगा और ठीक नीचे <b>इसी ऐप के अंदर 4 अलग-अलग तरह की YouTube Shorts</b> चलेंगी:
+                <b>(1) कैसे बनती है</b> • <b>(2) कितनी देर में बनेगी</b> • <b>(3) कितने की आएगी</b> • <b>(4) सीक्रेट प्रो टिप्स!</b>
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if "active_search_topic" not in st.session_state:
+        st.session_state.active_search_topic = "Dal Makhani (दाल मखनी)"
+    if "mega_prompt_seed" not in st.session_state:
+        st.session_state.mega_prompt_seed = (date.today() - date(2025, 1, 1)).days * 13
+
+    st.caption("⚡ **1-Click में देखें (दबाते ही 4 अलग-अलग एंगल की YouTube Shorts और AI Overview यहीं खुलेंगे):**")
+    qc1, qc2, qc3, qc4, qc5 = st.columns(5)
+    if qc1.button("🍲 दाल मखनी"):
+        st.session_state.active_search_topic = "Dal Makhani (दाल मखनी)"
+    if qc2.button("🍗 चिकन करी"):
+        st.session_state.active_search_topic = "Dhaba Style Chicken Curry"
+    if qc3.button("🐟 फिश फ्राई"):
+        st.session_state.active_search_topic = "Masala Fish Fry & Fish Curry"
+    if qc4.button("📊 Power Query"):
+        st.session_state.active_search_topic = "Excel Power Query Combine Files"
+    if qc5.button("🗣️ English Call"):
+        st.session_state.active_search_topic = "Spoken English Telecalling & Interview"
+
+    with st.expander("🚀 37 लाख+ Smart Prompt Generator से टॉपिक चुनें", expanded=False):
+        p_col1, p_col2 = st.columns([2.3, 1.1])
+        with p_col1:
+            chosen_domain = st.selectbox("📂 श्रेणी चुनें:", options=list(PROMPT_DOMAINS.keys()))
+        with p_col2:
+            st.markdown("<div style='padding-top:24px;'></div>", unsafe_allow_html=True)
+            if st.button("🎲 8 नए प्रॉम्प्ट्स"):
+                st.session_state.mega_prompt_seed += random.randint(3, 999)
+                st.rerun()
+        generated_prompts = generate_batch_of_smart_prompts(chosen_domain, st.session_state.mega_prompt_seed, count=8)
+        picked_p = st.selectbox("✨ स्मार्ट प्रॉम्प्ट चुनें:", options=generated_prompts)
+        if st.button("🎬 इस प्रॉम्प्ट पर 4 अलग-अलग Shorts और AI Overview चलाएं"):
+            st.session_state.active_search_topic = picked_p.split("—")[0].strip()
+            st.rerun()
+
+    # Main Search Box
+    s_col1, s_col2 = st.columns([2.6, 1.0])
+    with s_col1:
+        user_query = st.text_input(
+            "🔍 कुछ भी सर्च करें (जैसे: Dal Makhani, Chana Aloo, Saree Draping, Python Pandas, English Fluency):",
+            value=st.session_state.active_search_topic,
+        )
+    with s_col2:
+        st.markdown("<div style='padding-top:24px;'></div>", unsafe_allow_html=True)
+        if st.button("🚀 4-Angle Shorts चलाएं"):
+            st.session_state.active_search_topic = user_query.strip()
+
+    active_q = user_query.strip() or "Dal Makhani"
+    angles_data = build_multi_angle_ai_and_shorts(active_q)
+
+    # 1. TOP AI 360° OVERVIEW BAR WITH INTERACTIVE FILTER BUTTONS
+    st.markdown(f"### 🤖 AI 360° Overview: `{active_q}`")
+    ai_b1, ai_b2, ai_b3, ai_b4 = st.columns(4)
+    if "selected_ai_angle" not in st.session_state:
+        st.session_state.selected_ai_angle = "ALL"
+
+    if ai_b1.button("🍲 1. कैसे बनती/सीखते हैं"):
+        st.session_state.selected_ai_angle = 0
+    if ai_b2.button("⏱️ 2. कितना समय लगेगा"):
+        st.session_state.selected_ai_angle = 1
+    if ai_b3.button("💰 3. कितने की आएगी"):
+        st.session_state.selected_ai_angle = 2
+    if ai_b4.button("🔥 4. सभी 4 एंगल दिखाएं"):
+        st.session_state.selected_ai_angle = "ALL"
+
+    # Render AI Overview Cards
+    ov_c1, ov_c2 = st.columns(2)
+    for idx, ang in enumerate(angles_data):
+        if st.session_state.selected_ai_angle != "ALL" and st.session_state.selected_ai_angle != idx:
+            continue
+        target_col = ov_c1 if idx % 2 == 0 else ov_c2
+        with target_col:
+            st.markdown(
+                f"""
+                <div class="vip-card" style="border-left:6px solid #00ff9d;">
+                    <div style="font-size:0.74rem; color:#fbbf24; font-weight:900;">{ang['badge']}</div>
+                    <div style="font-size:0.95rem; font-weight:800; color:#ffffff; margin:3px 0;">{ang['title']}</div>
+                    <div style="font-size:0.84rem; color:#e2e8f0; line-height:1.4;">{ang['ai_summary']}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    # 2. IN-APP EMBEDDED YOUTUBE SHORTS (4 DIFFERENT ANGLES SIDE BY SIDE)
+    st.markdown(f"### ▶️ In-App YouTube Shorts & Videos (`{active_q}` के 4 अलग-अलग पहलू — सीधे ऐप के अंदर)")
+    v_col1, v_col2 = st.columns(2)
+    for idx, ang in enumerate(angles_data):
+        if st.session_state.selected_ai_angle != "ALL" and st.session_state.selected_ai_angle != idx:
+            continue
+        with (v_col1 if idx % 2 == 0 else v_col2):
+            render_in_app_youtube_short(
+                video_id=ang["video_id"],
+                title=ang["title"],
+                badge=ang["badge"],
+                height=340,
+            )
+
+
+# ==============================================================================
+# TAB 4: UNIVERSAL BANK PASSBOOK & ₹15,000 DREAM HOUSE + EAR MEDICAL VAULT
 # ==============================================================================
 with tab_vault:
     st.markdown(
         """
         <div class="vip-card">
-            <h4 style="margin:0; color:#fbbf24;">🏡 ₹15,000 अलग बचत तिजोरी (Dream House & Ear Medical Vault)</h4>
+            <h4 style="margin:0; color:#fbbf24;">🏦 यूनिवर्सल बैंक पासबुक & ₹15,000 अलग बचत तिजोरी (Dream House & Ear Medical Vault)</h4>
             <p style="margin:4px 0 0 0; font-size:0.86rem;">
-                यह ₹15,000/महीना का फंड आपके ₹23,000 खर्च बजट से बिल्कुल अलग और सुरक्षित है।
+                यहाँ आपका <b>₹38,000 Universal Account</b> का पूरा बैंक बैलेंस, खर्च बनाम बचत अनुपात और ₹15,000 की तिजोरी सुरक्षित रहती है।
             </p>
         </div>
         """,
@@ -1538,38 +2254,28 @@ with tab_vault:
     ear_all = get_bucket_sum(df_all_vault, "👂")
     emg_all = get_bucket_sum(df_all_vault, "🛡️")
 
-    budget_overflow = max(0.0, total_spent_month - MAX_SPENDING_BUDGET)
-    safe_15k = max(0.0, STRICT_SAVINGS_TARGET - budget_overflow)
+    v1, v2, v3, v4 = st.columns(4)
+    v1.metric("कुल बैंक बैलेंस बचा", f"₹{live_total_bank_balance:,.0f}", "Out of ₹38,000")
+    v2.metric("खर्च बजट बचा है", f"₹{remaining_spendable_balance:,.0f}", f"{100 - spend_utilization_pct:.0f}% Left of ₹23K")
+    v3.metric("इस महीने तिजोरी जमा", f"₹{vault_saved_this_month:,.0f}", "Target: ₹15,000")
+    v4.metric("कुल तिजोरी फंड", f"₹{vault_saved_all_time:,.0f}", f"{int(vault_saved_all_time // 50)} ईंटें 🧱")
 
-    v1, v2, v3 = st.columns(3)
-    v1.metric("इस महीने जमा", f"₹{vault_saved_this_month:,.0f}", "Target: ₹15,000")
-    v2.metric("कुल तिजोरी फंड", f"₹{vault_saved_all_time:,.0f}", f"{int(vault_saved_all_time // 50)} ईंटें 🧱")
-    v3.metric("₹15K सुरक्षा", f"₹{safe_15k:,.0f}", "100% Safe" if budget_overflow == 0 else f"-₹{budget_overflow:,.0f}")
-
-    st.progress(min(1.0, vault_saved_this_month / STRICT_SAVINGS_TARGET), text=f"मासिक ₹15K लक्ष्य: ₹{vault_saved_this_month:,.0f} / ₹15,000")
+    st.progress(
+        min(1.0, total_spent_month / MAX_SPENDING_BUDGET),
+        text=f"💳 मासिक खर्च मीटर (Spending Limit): ₹{total_spent_month:,.0f} / ₹{MAX_SPENDING_BUDGET:,} ({spend_utilization_pct:.1f}% खर्च हुआ)",
+    )
+    st.progress(
+        min(1.0, vault_saved_this_month / STRICT_SAVINGS_VAULT),
+        text=f"🔐 मासिक ₹15K बचत लक्ष्य: ₹{vault_saved_this_month:,.0f} / ₹15,000 ({(vault_saved_this_month/STRICT_SAVINGS_VAULT)*100:.1f}% जमा)",
+    )
     st.progress(min(1.0, dh_m / DREAM_HOUSE_GOAL), text=f"🏡 Dream House: ₹{dh_m:,.0f} / ₹{DREAM_HOUSE_GOAL:,} (कुल: ₹{dh_all:,.0f})")
     st.progress(min(1.0, ear_m / EAR_MEDICAL_GOAL), text=f"👂 Ear Treatment: ₹{ear_m:,.0f} / ₹{EAR_MEDICAL_GOAL:,} (कुल: ₹{ear_all:,.0f})")
     st.progress(min(1.0, emg_m / EMERGENCY_GOAL), text=f"🛡️ Emergency Fund: ₹{emg_m:,.0f} / ₹{EMERGENCY_GOAL:,} (कुल: ₹{emg_all:,.0f})")
 
-    bricks_count = max(1, int((vault_saved_all_time + dh_m) // 50))
-    st.markdown(
-        f"""
-        <div class="vip-card">
-            <div style="font-weight:800; color:#fbbf24; margin-bottom:4px;">
-                🏗️ सपनों के घर की दीवार ({bricks_count} ईंटें जुड़ चुकी हैं @ ₹50/ईंट)
-            </div>
-            <div style="font-size:1.25rem; line-height:1.45; word-wrap:break-word;">
-                {"🧱" * min(60, bricks_count)}
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
     with st.form("vault_deposit_form", clear_on_submit=True):
         vc1, vc2, vc3 = st.columns(3)
         with vc1:
-            dep_by = st.selectbox("किसने जमा किया?", list(USERS_DICT.keys()) + ["Joint Family"])
+            dep_by = st.selectbox("किसने जमा किया?", ["Universal Family Account"] + list(USERS_DICT.keys()))
         with vc2:
             v_bucket = st.selectbox(
                 "फंड चुनें",
@@ -1581,28 +2287,21 @@ with tab_vault:
             )
         with vc3:
             v_amt = st.number_input("रकम (₹)", min_value=100.0, max_value=100000.0, value=5000.0, step=500.0)
-        v_note = st.text_input("नोट / बैंक रेफरेंस", placeholder="जैसे: SBI RD या अलग अकाउंट में जमा")
-        if st.form_submit_button("🔐 तिजोरी में जमा करें"):
+        v_note = st.text_input("नोट / बैंक रेफरेंस", placeholder="जैसे: SBI RD या अलग सेविंग्स अकाउंट में जमा")
+        if st.form_submit_button("🔐 तिजोरी में लॉक करें"):
             add_vault_deposit(dep_by, v_bucket, v_amt, v_note)
-            st.success(f"🎉 ₹{v_amt:,.0f} तिजोरी में लॉक हो गए!")
+            st.success(f"🎉 ₹{v_amt:,.0f} तिजोरी में सुरक्षित लॉक हो गए!")
             st.rerun()
 
     if not df_all_vault.empty:
         st.dataframe(df_all_vault[["id", "timestamp", "deposited_by", "vault_bucket", "amount", "notes"]], use_container_width=True, hide_index=True)
-        if is_admin:
-            with st.expander("👑 Admin (Ajay Only): तिजोरी की गलत एंट्री डिलीट करें"):
-                del_v_id = st.number_input("हटाने के लिए Vault ID डालें", min_value=1, step=1, key="del_v_id")
-                if st.button("🗑️ Vault Entry हटाएं"):
-                    delete_vault_deposit_from_db(int(del_v_id))
-                    st.success(f"Vault ID #{int(del_v_id)} हटा दिया गया!")
-                    st.rerun()
 
 
 # ==============================================================================
-# TAB 3: LIVE LEDGER, PERIOD SELECTOR, AI REVIEWER & AJAY ADMIN EDIT/DELETE
+# TAB 5: LIVE LEDGER, PERIOD SELECTOR, AI REVIEWER & ADMIN EDIT/DELETE
 # ==============================================================================
 with tab_ledger:
-    st.markdown("### 📊 कस्टम पीरियड खर्च, रजिस्टर और 🤖 AI सलाहकार")
+    st.markdown("### 📊 यूनिवर्सल पासबुक रजिस्टर और 🤖 AI खर्च बनाम बचत ऑडिटर")
 
     period_choice = st.selectbox(
         "📅 किस समय का हिसाब देखना चाहते हैं? (Select Time Period)",
@@ -1640,37 +2339,7 @@ with tab_ledger:
     m1, m2, m3 = st.columns(3)
     m1.metric("चुने गए पीरियड का खर्च", f"₹{p_total:,.0f}", f"{len(df_period)} Entries")
     m2.metric("फालतू खर्च (Bad)", f"₹{p_bad:,.0f}", "Target: ₹0")
-    m3.metric("इस महीने बचा बजट", f"₹{MAX_SPENDING_BUDGET - total_spent_month:,.0f}", f"आज Safe: ₹{daily_safe_limit:,.0f}")
-
-    st.progress(min(1.0, food_spent_month / CAP_FOOD), text=f"🍲 इस महीने Food Cap: ₹{food_spent_month:,.0f} / ₹{CAP_FOOD:,}")
-    st.progress(min(1.0, rent_spent_month / CAP_RENT), text=f"🏠 इस महीने Rent Cap: ₹{rent_spent_month:,.0f} / ₹{CAP_RENT:,}")
-
-    # AI Financial Reviewer
-    with st.expander("🤖 AI Financial Reviewer (अपने खर्च पर AI से सवाल पूछें)", expanded=False):
-        ai_q = st.text_input(
-            "💬 अपना सवाल लिखें:",
-            value="इस पीरियड में मेरा सबसे ज़्यादा पैसा कहाँ जा रहा है और मैं ₹15,000 की बचत कैसे पक्की करूं?",
-        )
-        if st.button("🧠 AI रिव्यू रिपोर्ट देखें"):
-            if df_period.empty:
-                st.info("चुने गए पीरियड में कोई खर्च दर्ज नहीं है।")
-            else:
-                top_cat = df_period.groupby("category")["amount"].sum().sort_values(ascending=False)
-                top_who = df_period.groupby("spent_by")["amount"].sum().sort_values(ascending=False)
-                st.markdown(
-                    f"""
-                    <div class="vip-card">
-                        <h4 style="color:#00ff9d; margin:0 0 6px 0;">🧠 AI Financial Review ({period_choice})</h4>
-                        <ul>
-                            <li><b>सबसे बड़ा खर्च:</b> <b>{top_cat.index[0]}</b> में कुल <b>₹{top_cat.iloc[0]:,.0f}</b> खर्च हुए हैं।</li>
-                            <li><b>किसने सबसे ज़्यादा खर्च किया:</b> <b>{top_who.index[0]}</b> (₹{top_who.iloc[0]:,.0f})।</li>
-                            <li><b>फालतू खर्च:</b> ₹{p_bad:,.0f} गैर-ज़रूरी चीजों में गए (= <b>{int(p_bad // 50)} घर की ईंटें 🧱</b>)।</li>
-                            <li><b>सलाह:</b> अगले 7 दिन रोज़ का खर्च <b>₹{daily_safe_limit:,.0f}</b> से नीचे रखें।</li>
-                        </ul>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
+    m3.metric("उपलब्ध खर्च बैलेंस", f"₹{remaining_spendable_balance:,.0f}", f"आज Safe: ₹{daily_safe_limit:,.0f}")
 
     if not df_period.empty:
         df_show = df_period.copy()
@@ -1683,20 +2352,38 @@ with tab_ledger:
 
         ch1, ch2 = st.columns(2)
         with ch1:
-            fig_c = px.pie(df_period.groupby("category", as_index=False)["amount"].sum(), names="category", values="amount", hole=0.48, template="plotly_dark")
-            fig_c.update_layout(margin=dict(t=10, b=10, l=5, r=5), paper_bgcolor="rgba(0,0,0,0)", font=dict(color="#fff"))
+            fig_c = px.pie(
+                df_period.groupby("category", as_index=False)["amount"].sum(),
+                names="category",
+                values="amount",
+                hole=0.48,
+                template="plotly_dark",
+                title="श्रेणी के अनुसार खर्च (%)",
+            )
+            fig_c.update_layout(margin=dict(t=35, b=10, l=5, r=5), paper_bgcolor="rgba(0,0,0,0)", font=dict(color="#fff"))
             st.plotly_chart(fig_c, use_container_width=True)
         with ch2:
-            fig_m = px.bar(df_period.groupby("spent_by", as_index=False)["amount"].sum(), x="spent_by", y="amount", color="spent_by", template="plotly_dark")
-            fig_m.update_layout(margin=dict(t=10, b=10, l=5, r=5), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#fff"), showlegend=False)
-            st.plotly_chart(fig_m, use_container_width=True)
+            bank_vs_df = pd.DataFrame(
+                {
+                    "हिस्सा": ["खर्च हो चुका (Spent)", "खर्च के लिए बचा (Available)", "लॉक्ड बचत (Vault ₹15K)"],
+                    "रकम": [total_spent_month, remaining_spendable_balance, effective_monthly_savings],
+                }
+            )
+            fig_b = px.bar(
+                bank_vs_df,
+                x="हिस्सा",
+                y="रकम",
+                color="हिस्सा",
+                template="plotly_dark",
+                title="₹38,000 Universal Bank: खर्च बनाम बचत",
+            )
+            fig_b.update_layout(margin=dict(t=35, b=10, l=5, r=5), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#fff"), showlegend=False)
+            st.plotly_chart(fig_b, use_container_width=True)
 
-        # ADMIN ONLY: Edit or Delete Wrong Entries (Strictly locked to Ajay)
         if is_admin:
             st.markdown("---")
             st.markdown("#### 👑 अजय एडमिन कंट्रोल: गलत एंट्री सुधारें (Edit) या हटाएं (Delete)")
             adm_c1, adm_c2 = st.columns(2)
-
             with adm_c1:
                 with st.expander("✏️ किसी एंट्री को सुधारें (Edit Entry by ID)"):
                     all_ids = df_all_expenses["id"].tolist()
@@ -1704,7 +2391,7 @@ with tab_ledger:
                     row_data = df_all_expenses[df_all_expenses["id"] == edit_id].iloc[0]
 
                     with st.form("admin_edit_expense_form"):
-                        new_sb = st.selectbox("Spent By", options=list(USERS_DICT.keys()) + ["Joint Family (पूरा परिवार)"])
+                        new_sb = st.selectbox("Spent By", options=["Universal Family Account"] + list(USERS_DICT.keys()))
                         new_cat = st.selectbox(
                             "Category",
                             options=list(CATEGORY_DESCRIPTIONS.keys()),
@@ -1729,324 +2416,12 @@ with tab_ledger:
                         delete_expense_from_db(int(del_id))
                         st.success(f"एंट्री ID #{int(del_id)} को हटा दिया गया है!")
                         st.rerun()
-        else:
-            st.caption("🔒 नोट: गलत एंट्री को एडिट या डिलीट करने का अधिकार सिर्फ **Admin (Ajay)** के पास है।")
 
 
 # ==============================================================================
-# TAB 4: 37 LAKH+ SMART PROMPT ENGINE + SPOKEN ENGLISH + AI & TECH CLASSES
-# ==============================================================================
-with tab_prompts:
-    st.markdown(
-        """
-        <div class="vip-card">
-            <h4 style="margin:0; color:#00ff9d;">🚀 37,50,000+ (37 लाख+) Smart Prompt Generator & Career Lab</h4>
-            <p style="margin:4px 0 0 0; font-size:0.86rem;">
-                यहाँ लाखों अलग-अलग प्रॉम्प्ट्स का खजाना है! हर क्लिक पर नए प्रॉम्प्ट्स बनाएं या कस्टम प्रॉम्प्ट बिल्डर से अपना खुद का प्रॉम्प्ट तैयार करें।
-            </p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    if "mega_prompt_seed" not in st.session_state:
-        st.session_state.mega_prompt_seed = (date.today() - date(2025, 1, 1)).days * 13
-
-    p_col1, p_col2 = st.columns([2.3, 1.1])
-    with p_col1:
-        chosen_domain = st.selectbox(
-            "📂 1. प्रॉम्प्ट की श्रेणी चुनें (Choose Prompt Category):",
-            options=list(PROMPT_DOMAINS.keys()),
-        )
-    with p_col2:
-        st.markdown("<div style='padding-top:24px;'></div>", unsafe_allow_html=True)
-        if st.button("🎲 8 नए प्रॉम्प्ट्स लाएं"):
-            st.session_state.mega_prompt_seed += random.randint(3, 999)
-            st.rerun()
-
-    generated_prompts = generate_batch_of_smart_prompts(chosen_domain, st.session_state.mega_prompt_seed, count=8)
-    selected_mega_prompt = st.selectbox(
-        "✨ 2. आज के ताज़ा स्मार्ट प्रॉम्प्ट्स में से चुनें (हर क्लिक पर नया):",
-        options=generated_prompts,
-    )
-
-    with st.expander("🛠️ Custom Lakh-Prompt Mixer (अपनी मर्जी से Topic + Context + Style मिलाकर नया प्रॉम्प्ट बनाएं)"):
-        dom_obj = PROMPT_DOMAINS[chosen_domain]
-        mix_t = st.selectbox("Topic चुनें:", dom_obj["topics"])
-        mix_c = st.selectbox("Context / स्थिति चुनें:", dom_obj["contexts"])
-        mix_f = st.selectbox("उत्तर की स्टाइल चुनें:", PROMPT_FORMATS)
-        if st.button("⚡ यह कस्टम प्रॉम्प्ट ऊपर बॉक्स में लगाएं"):
-            selected_mega_prompt = f"{mix_t} — {mix_c} ({mix_f})"
-
-    final_search_prompt = st.text_input("🔍 फाइनल सर्च / AI प्रॉम्प्ट (चाहें तो एडिट करें):", value=selected_mega_prompt)
-    enc_p = urllib.parse.quote_plus(final_search_prompt)
-
-    b_p1, b_p2, b_p3, b_p4 = st.columns(4)
-    in_app_ai = b_p1.button("🤖 यहीं जवाब देखें")
-    b_p2.markdown(
-        f'<a href="https://www.google.com/search?q={enc_p}" target="_blank" class="upi-app-btn" style="padding:10px; font-size:0.83rem; margin:0;">🌐 Google Search</a>',
-        unsafe_allow_html=True,
-    )
-    b_p3.markdown(
-        f'<a href="https://www.youtube.com/results?search_query={enc_p}" target="_blank" class="upi-scanner-btn" style="padding:10px; font-size:0.83rem; margin:0;">▶️ YouTube पर देखें</a>',
-        unsafe_allow_html=True,
-    )
-    b_p4.markdown(
-        f'<a href="https://news.google.com/search?q={enc_p}" target="_blank" class="upi-app-btn" style="padding:10px; font-size:0.83rem; margin:0; background:linear-gradient(90deg,#38bdf8,#0284c7); color:#fff !important;">📰 Latest News</a>',
-        unsafe_allow_html=True,
-    )
-
-    if in_app_ai:
-        st.markdown(
-            f"""
-            <div class="vip-card">
-                <h4 style="color:#fbbf24; margin-top:0;">🤖 AI Mentor Instant Guide:</h4>
-                <p><b>चुना गया प्रॉम्प्ट:</b> <i>{final_search_prompt}</i></p>
-                <ul>
-                    <li><b>Step 1 (Action):</b> इसके मुख्य बिंदु को आज 15 मिनट बोलकर या लिखकर प्रैक्टिस करें।</li>
-                    <li><b>Step 2 (Deep Dive):</b> ऊपर दिए गए <b>Google Search</b> या <b>YouTube पर देखें</b> बटन को दबाकर इसके लाइव उदाहरण और वीडियो तुरंत खोलें।</li>
-                </ul>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    st.markdown("---")
-    sub_eng, sub_ai, sub_road = st.tabs(
-        ["🗣️ आज की Spoken English प्रैक्टिस", "🤖 AI, Python & Excel Long Videos", "🗺️ Career Checklist"]
-    )
-
-    with sub_eng:
-        st.markdown(
-            """
-            <div class="vip-card">
-                <h4 style="color:#00ff9d; margin-top:0;">🗣️ आज के 6 ऑफिस और इंटरव्यू इंग्लिश वाक्य (जोर से बोलकर अभ्यास करें):</h4>
-                <ol>
-                    <li><b>"I have cross-checked the report and updated the tracker."</b> (मैंने रिपोर्ट चेक करके ट्रैकर अपडेट कर दिया है।)</li>
-                    <li><b>"Could you please give me 10 minutes to automate this sheet?"</b> (क्या आप मुझे इस शीट को ऑटोमेट करने के लिए 10 मिनट दे सकते हैं?)</li>
-                    <li><b>"Don't worry about the mistake, I am fixing it right away."</b> (गलती की चिंता मत कीजिए, मैं इसे अभी ठीक कर रहा हूँ।)</li>
-                    <li><b>"The vehicle was delayed due to heavy congestion on NH-48."</b> (NH-48 पर भारी जाम के कारण गाड़ी लेट हुई।)</li>
-                    <li><b>"I am learning Python, SQL, and Generative AI every evening."</b> (मैं हर शाम Python, SQL और AI सीख रहा हूँ।)</li>
-                    <li><b>"Every failure teaches me how to speak and code better."</b> (हर असफलता मुझे और बेहतर बोलना और कोडिंग करना सिखाती है।)</li>
-                </ol>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        st.video("https://www.youtube.com/watch?v=jul2urONzOQ")
-
-    with sub_ai:
-        tech_track = st.selectbox(
-            "कोर्स चुनें:",
-            [
-                "🤖 Generative AI, Prompt Engineering & Latest AI Tools",
-                "🐍 Python Full Course (Automation, Playwright, Pandas)",
-                "📊 Advanced Excel & Power Query MIS Mastery",
-                "🗄️ SQL & PySpark Data Engineering Course",
-            ],
-        )
-        TECH_VIDEOS = {
-            "🤖 Generative AI, Prompt Engineering & Latest AI Tools": [
-                ("Generative AI Full Course for Beginners", "https://www.youtube.com/watch?v=mEsleV16qdo"),
-                ("Build AI Web Apps with Python & Streamlit", "https://www.youtube.com/watch?v=JwSS70SZdyM"),
-            ],
-            "🐍 Python Full Course (Automation, Playwright, Pandas)": [
-                ("Python Complete Tutorial in Hindi", "https://www.youtube.com/watch?v=UrsmFxEIp5k"),
-                ("Python Pandas Data Analysis Tutorial", "https://www.youtube.com/watch?v=vmEHCJofslg"),
-            ],
-            "📊 Advanced Excel & Power Query MIS Mastery": [
-                ("Advanced Excel Full Course (XLOOKUP, Pivot, Dashboards)", "https://www.youtube.com/watch?v=Vl0H-qTclOg"),
-                ("Power Query Automation in Excel", "https://www.youtube.com/watch?v=0aeZX1l4JT4"),
-            ],
-            "🗄️ SQL & PySpark Data Engineering Course": [
-                ("SQL Full Course for Data Engineers", "https://www.youtube.com/watch?v=HXV3zeQKqGY"),
-                ("PySpark Big Data Engineering Course", "https://www.youtube.com/watch?v=_C8kWso4ne4"),
-            ],
-        }
-        for t_title, t_url in TECH_VIDEOS[tech_track]:
-            st.markdown(f"**▶️ {t_title}**")
-            st.video(t_url)
-
-    with sub_road:
-        SKILLS = [
-            ("sk_eng", "🗣️ Daily Spoken English & Interview Confidence"),
-            ("sk_ai", "🤖 Generative AI & Prompt Engineering"),
-            ("sk_exl", "📊 Advanced Excel (XLOOKUP, Pivot, Power Query)"),
-            ("sk_py", "🐍 Python Core, Playwright & Pandas Automation"),
-            ("sk_sql", "🗄️ SQL & Database Mastery"),
-            ("sk_de", "⚡ PySpark, Streamlit & Data Engineering Portfolio"),
-        ]
-        prog = get_career_progress()
-        done_c = 0
-        for k, lbl in SKILLS:
-            cur_v = prog.get(k, False)
-            nv = st.checkbox(lbl, value=cur_v, key=f"sk_{k}")
-            if nv != cur_v:
-                set_career_progress(k, nv)
-                st.rerun()
-            if nv:
-                done_c += 1
-        st.progress(done_c / len(SKILLS), text=f"प्रगति: {done_c}/{len(SKILLS)} स्किल्स पूरी!")
-
-
-# ==============================================================================
-# TAB 5: CHICKEN/FISH, CHINESE/KOREAN FOOD, TRAVEL, GIRLS/LIFESTYLE, CARTOONS & NEWS
-# ==============================================================================
-with tab_media:
-    st.markdown(
-        """
-        <div class="vip-card">
-            <h4 style="margin:0; color:#fbbf24;">🍗 फूड & मुकबांग • 🍜 चाइनीज़/कोरियन • ✈️ ट्रैवल & Vlogs • 🎬 कार्टून, कहानियाँ & न्यूज़</h4>
-            <p style="margin:4px 0 0 0; font-size:0.86rem;">
-                पढ़ाई और काम के बाद मूड फ्रेश करने और घर पर ही होटल जैसा चिकन, मछली, चाइनीज़ और कोरियन खाना बनाने का पूरा हब!
-            </p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    m_sub1, m_sub2, m_sub3, m_sub4 = st.tabs(
-        [
-            "🍗 चिकन, मछली & देसी खाना",
-            "🍜 चाइनीज़, कोरियन & Mukbang",
-            "✈️ ट्रैवल, Lifestyle & Vlogs",
-            "🎬 कार्टून, कहानियाँ & News",
-        ]
-    )
-
-    # 1. CHICKEN, FISH & DESI FOOD
-    with m_sub1:
-        st.markdown("#### 🍗 देसी चिकन करी, मछली फ्राई/करी और बजट घर का खाना")
-        f_col1, f_col2 = st.columns(2)
-        with f_col1:
-            st.markdown("**🍗 ढाबा स्टाइल मसालेदार चिकन करी (घर पर सस्ते में)**")
-            st.video("https://www.youtube.com/watch?v=CO2c3s2nB50")
-            st.markdown(
-                '<a href="https://www.youtube.com/results?search_query=desi+chicken+curry+recipe+home+style+shorts+hindi" target="_blank" class="upi-app-btn" style="font-size:0.84rem; padding:10px;">🍗 चिकन करी और बिरयानी Shorts खोलें</a>',
-                unsafe_allow_html=True,
-            )
-        with f_col2:
-            st.markdown("**🐟 सरसों वाली मछली करी और कुरकुरी फिश फ्राई**")
-            st.video("https://www.youtube.com/watch?v=K9q6b3K35jU")
-            st.markdown(
-                '<a href="https://www.youtube.com/results?search_query=masala+fish+fry+and+fish+curry+desi+style+shorts+hindi" target="_blank" class="upi-scanner-btn" style="font-size:0.84rem; padding:10px;">🐟 मछली फ्राई और फिश करी Reels खोलें</a>',
-                unsafe_allow_html=True,
-            )
-
-        st.markdown("---")
-        d_col1, d_col2 = st.columns(2)
-        with d_col1:
-            st.markdown("**🍛 ₹40 कुकर मसाला तहरी (15 मिनट में)**")
-            st.video("https://www.youtube.com/watch?v=w7Wj2_T0b9A")
-        with d_col2:
-            st.markdown("**🥗 कुरकुरी तली हुई भिंडी (टिफिन स्पेशल)**")
-            st.video("https://www.youtube.com/watch?v=3m7B92p2R7k")
-
-    # 2. CHINESE, KOREAN FOOD & MUKBANG REELS
-    with m_sub2:
-        st.markdown("#### 🍜 देसी चाइनीज़, कोरियन स्ट्रीट फूड और खाना खाने वाली (Mukbang) रील्स")
-        ck_c1, ck_c2 = st.columns(2)
-        with ck_c1:
-            st.markdown("**🍜 स्ट्रीट स्टाइल चाउमीन, मंचूरियन और मोमोज़**")
-            st.video("https://www.youtube.com/watch?v=AD9h3d7X6tI")
-            st.markdown(
-                '<a href="https://www.youtube.com/results?search_query=desi+street+style+chowmein+manchurian+chilli+chicken+shorts" target="_blank" class="upi-app-btn" style="font-size:0.84rem; padding:10px;">🥟 चाइनीज़ चाउमीन & मोमोज़ Shorts</a>',
-                unsafe_allow_html=True,
-            )
-        with ck_c2:
-            st.markdown("**🌶️ स्पाइसी कोरियन रैमेन (Ramen), Tteokbokki & Mukbang**")
-            st.video("https://www.youtube.com/watch?v=s8B4nL5k2vM")
-            st.markdown(
-                '<a href="https://www.youtube.com/results?search_query=korean+spicy+ramen+street+food+eating+mukbang+shorts" target="_blank" class="upi-scanner-btn" style="font-size:0.84rem; padding:10px;">🍜 Korean Food & Eating Reels खोलें</a>',
-                unsafe_allow_html=True,
-            )
-
-        st.markdown(
-            '<a href="https://www.youtube.com/results?search_query=indian+spicy+chicken+fish+thali+eating+show+mukbang+shorts" target="_blank" class="upi-app-btn" style="font-size:0.9rem; padding:12px;">🍽️ स्वादिष्ट खाना खाने वाली (Desi Thali & Chicken/Fish Mukbang) Reels देखें</a>',
-            unsafe_allow_html=True,
-        )
-
-    # 3. TRAVEL, GIRLS / LIFESTYLE / DANCE / FASHION VLOGS
-    with m_sub3:
-        st.markdown("#### ✈️ ट्रैवल व्लॉग्स, लाइफस्टाइल, डांस और ट्रेंडिंग गर्ल्स/फैशन रील्स")
-        tr_c1, tr_c2 = st.columns(2)
-        with tr_c1:
-            st.markdown("**🏔️ खूबसूरत पहाड़, ट्रेन यात्रा और बजट ट्रैवल व्लॉग्स**")
-            st.video("https://www.youtube.com/watch?v=K4TOrB7at0Y")
-            st.markdown(
-                '<a href="https://www.youtube.com/results?search_query=indian+budget+mountain+train+travel+vlog+shorts+hindi" target="_blank" class="upi-app-btn" style="font-size:0.84rem; padding:10px;">✈️ खूबसूरत Travel Shorts खोलें</a>',
-                unsafe_allow_html=True,
-            )
-        with tr_c2:
-            st.markdown("**💃 ट्रेंडिंग गर्ल्स व्लॉग्स, लाइफस्टाइल, डांस और रिएक्शन रील्स**")
-            st.markdown(
-                """
-                <div class="vip-card">
-                    <p style="font-size:0.86rem; margin-bottom:8px;">मूड फ्रेश करने के लिए ट्रेंडिंग लाइफस्टाइल, कॉलेज/ट्रैवल गर्ल्स व्लॉग्स, डांस और फन रील्स की सीधी फीड:</p>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            st.markdown(
-                '<a href="https://www.youtube.com/results?search_query=indian+girls+lifestyle+travel+mini+vlog+dance+trending+shorts" target="_blank" class="upi-scanner-btn" style="font-size:0.86rem; padding:11px;">✨ Trending Girls Lifestyle & Mini-Vlog Reels</a>',
-                unsafe_allow_html=True,
-            )
-            st.markdown(
-                '<a href="https://www.youtube.com/results?search_query=korean+and+indian+cute+aesthetic+travel+food+vlog+shorts" target="_blank" class="upi-app-btn" style="font-size:0.86rem; padding:11px;">🌸 Korean & Desi Aesthetic Vlog Shorts</a>',
-                unsafe_allow_html=True,
-            )
-
-    # 4. INDIAN CARTOONS, HINDI KAHANIYAAN & LIVE NEWS
-    with m_sub4:
-        st.markdown("#### 🎬 इंडियन कार्टून, मजेदार हिंदी कहानियाँ और ताज़ा खबरें (Live News)")
-        cn_c1, cn_c2, cn_c3 = st.columns(3)
-        with cn_c1:
-            st.markdown(
-                '<a href="https://www.youtube.com/results?search_query=indian+cartoon+moral+stories+chacha+chaudhary+tenali+rama+hindi" target="_blank" class="upi-app-btn" style="font-size:0.84rem; padding:11px;">🎬 इंडियन कार्टून & एनिमेशन</a>',
-                unsafe_allow_html=True,
-            )
-        with cn_c2:
-            st.markdown(
-                '<a href="https://www.youtube.com/results?search_query=interesting+hindi+kahaniya+suspense+moral+story" target="_blank" class="upi-scanner-btn" style="font-size:0.84rem; padding:11px;">📖 रोचक हिंदी कहानियाँ</a>',
-                unsafe_allow_html=True,
-            )
-        with cn_c3:
-            st.markdown(
-                '<a href="https://www.youtube.com/results?search_query=live+hindi+news+india+today+aaj+tak+ndtv+india" target="_blank" class="upi-app-btn" style="font-size:0.84rem; padding:11px; background:linear-gradient(90deg,#ef4444,#dc2626); color:#fff !important;">📺 Live Hindi News</a>',
-                unsafe_allow_html=True,
-            )
-
-        with st.expander("📖 यहीं पढ़ें: 2-मिनट की रोचक और बुद्धिमानी भरी हिंदी कहानी", expanded=True):
-            st.markdown(
-                """
-                **👑 कहानी: पत्थर की कीमत (अपनी असली ताकत पहचानो)**
-                एक बार एक गरीब युवक एक संत के पास गया और बोला—*"गुरुजी, मैं बहुत मेहनत करता हूँ, फिर भी लोग मेरी कदर नहीं करते और कई बार काम में फेल हो जाता हूँ।"*
-                संत ने उसे एक चमकदार पत्थर दिया और कहा—*"इसे पहले सब्ज़ी मंडी ले जाओ, फिर सुनार के पास, और अंत में हीरे के जौहरी के पास। बस कीमत पूछना, बेचना मत!"*
-                - सब्ज़ी वाले ने कहा: *"इसे दे दो और 2 किलो आलू ले लो।"*
-                - सुनार ने कहा: *"मैं इसके ₹5,000 दे सकता हूँ।"*
-                - हीरे के जौहरी ने जब उसे देखा तो हाथ जोड़कर बोला: *"यह अनमोल हीरा है, मेरी पूरी दुकान बेचकर भी इसकी कीमत नहीं चुकाई जा सकती!"*
-
-                **💡 सीख:** अगर ऑफिस में या शुरुआती करियर में कोई आपकी कीमत न समझे, तो निराश मत होइए। अपनी स्किल्स (**Python, Excel, Spoken English, AI**) को तराशते रहिए—सही जगह (Data Engineering) पहुँचते ही आपकी कीमत कई गुना बढ़ जाएगी!
-                """
-            )
-
-
-# ==============================================================================
-# TAB 6: FAILURE RECOVERY HUB (ENGLISH, CODING, OFFICE) & PLAYABLE MIND GAMES
+# TAB 6: FAILURE RECOVERY HUB & PLAYABLE MIND GAMES
 # ==============================================================================
 with tab_comeback:
-    st.markdown(
-        """
-        <div class="vip-card">
-            <h4 style="margin:0; color:#00ff9d;">🔥 फेलियर से जीत (Failure Recovery Hub) & 🧠 दिमागी खेल (Mind Games)</h4>
-            <p style="margin:4px 0 0 0; font-size:0.86rem;">
-                अंग्रेज़ी बोलने, सॉफ्टवेयर सीखने या ऑफिस के काम में जब भी कोई गलती या असफलता मिले—यहाँ से तुरंत अपना हौसला और रास्ता वापस पाएं!
-            </p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
     fb_tab, game_tab = st.tabs(["🔥 हार से जीत की सच्ची कहानियाँ और समाधान", "🎮 दिमागी खेल (Play Mind Games)"])
 
     with fb_tab:
@@ -2054,65 +2429,21 @@ with tab_comeback:
             "🛡️ अभी आपको किस क्षेत्र में कठिनाई या असफलता महसूस हो रही है?",
             [
                 "🗣️ 1. Spoken English में अटकना, झिझक या किसी का हंसना",
-                "💻 2. Software / Python / Excel सीखने में एरर आना या समझ न आना",
-                "🏢 3. Office Work में गलती होना, बॉस का दबाव या प्रमोशन रुकना",
+                "💻 2. Software / Python / Power Query सीखने में एरर आना",
+                "🏢 3. Office Work में गलती होना या काम का दबाव",
                 "💸 4. अचानक बड़ा खर्च आ जाना या बजट बिगड़ जाना",
             ],
         )
-
         if "Spoken English" in failure_type:
             st.markdown(
                 """
                 <div class="vip-card">
-                    <h4 style="color:#fbbf24; margin-top:0;">🗣️ जब अंग्रेज़ी बोलते समय जुबान अटक जाए या लोग हंसें — तब क्या करें?</h4>
-                    <p><b>📖 सच्ची प्रेरक कहानी:</b> भारत के सबसे बड़े कीपैड और सॉफ्टवेयर लीडर्स में से कई ने 12वीं तक हिंदी माध्यम से पढ़ाई की। अपने पहले इंटरव्यू में जब वे टूटी-फूटी इंग्लिश बोले, तो इंटरव्यूअर मुस्कुरा दिया। उन्होंने हार मानने के बजाय एक नियम बनाया: <b>"मैं रोज़ रात को 10 मिनट अपने आज के काम के बारे में सिर्फ 5 लाइन इंग्लिश में बोलूंगा।"</b> 6 महीने के अंदर वही इंसान पूरी टीम को लीड करने लगा!</p>
-                    <hr style="border-color:#334155;">
-                    <b>🛠️ तुरंत काम करने का 3-स्टेप फॉर्मूला:</b>
-                    <ol>
-                        <li><b>अंग्रेज़ी एक भाषा है, बुद्धिमत्ता का पैमाना नहीं:</b> अगर कोई आपकी ग्रामर पर हंसे, तो समझ जाइए कि आपको 2 भाषाएं (हिंदी + इंग्लिश) आती हैं।</li>
-                        <li><b>Template Formula अपनाएं:</b> पूरे वाक्य बनाने के बजाय 3 फिक्स ऑफिस टेम्पलेट रट लें:
-                            <ul>
-                                <li><i>"I am looking into this issue and will update you in 15 minutes."</i></li>
-                                <li><i>"As per the latest data, here is the current status..."</i></li>
-                                <li><i>"Could you please clarify this point once more?"</i></li>
-                            </ul>
-                        </li>
-                        <li><b>2-Minute Voice Note Trick:</b> WhatsApp पर खुद के नंबर पर रोज़ 1 मिनट का इंग्लिश वॉइस नोट भेजें और सुनें। 21 दिन में झिझक 100% खत्म हो जाएगी!</li>
-                    </ol>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-        elif "Software" in failure_type:
-            st.markdown(
-                """
-                <div class="vip-card">
-                    <h4 style="color:#00ff9d; margin-top:0;">💻 जब Python / SQL कोड समझ न आए या बार-बार Error आए — तब क्या करें?</h4>
-                    <p><b>📖 सच्ची कहानी:</b> लॉजिस्टिक्स ऑपरेशन में काम करने वाले एक सामान्य कर्मचारी ने जब पहली बार Python और Playwright सीखा, तो पहले 15 दिन तक उसका एक भी कोड बिना Error के नहीं चला। कई बार लगा कि "कोडिंग मेरे बस की नहीं है"। लेकिन उसने फैसला किया कि वह पूरा कोर्स रटने के बजाय <b>"अपने ऑफिस की सिर्फ 1 एक्सेल फाइल को Python से ऑटोमेट करेगा।"</b> जैसे ही पहली स्क्रिप्ट चली, उसका आत्मविश्वास आसमान छू गया!</p>
-                    <hr style="border-color:#334155;">
-                    <b>🛠️ कोडिंग फेलियर से निकलने का पक्का तरीका:</b>
-                    <ol>
-                        <li><b>Error का मतलब फेलियर नहीं है:</b> दुनिया के सबसे बड़े सीनियर इंजीनियर का कोड भी पहली बार में नहीं चलता। लाल रंग का Error आपको यह बताता है कि किस लाइन को सुधारना है।</li>
-                        <li><b>Copy-Modify-Run नियम:</b> कोई भी कोड शून्य से रटकर मत लिखिए। पहले चलता हुआ कोड कॉपी करें, उसमें सिर्फ 1 बदलाव करें और चलाकर देखें।</li>
-                        <li><b>20-मिनट रूल:</b> अगर 20 मिनट तक कोई बग सॉल्व न हो, तो पानी पिएं, उस Error को AI या Google में पेस्ट करें—2 सेकंड में हल मिल जाएगा!</li>
-                    </ol>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-        elif "Office Work" in failure_type:
-            st.markdown(
-                """
-                <div class="vip-card">
-                    <h4 style="color:#38bdf8; margin-top:0;">🏢 जब ऑफिस में गलती हो जाए, बॉस डांटे या काम का बोझ ज़्यादा हो — तब क्या करें?</h4>
-                    <p><b>📖 मनोवैज्ञानिक सत्य:</b> ऑफिस में गलती सिर्फ उसी से होती है जो सच में काम करता है। अगर कभी रिपोर्ट में या डेटा में कोई चूक हो जाए, तो घबराकर सफाई देने के बजाय शांत दिमाग से समाधान पेश करने वाला इंसान ही सबसे ज़्यादा भरोसेमंद माना जाता है।</p>
-                    <hr style="border-color:#334155;">
-                    <b>🛠️ ऑफिस संकट से तुरंत बाहर निकलने के 3 नियम:</b>
-                    <ol>
-                        <li><b>Own + Fix + Prevent:</b> सिर्फ एक लाइन बोलें—<i>"There was a data mismatch in the previous file. I have corrected it now and added a formula check so it won't happen again."</i> (इससे बॉस का गुस्सा तुरंत शांत हो जाता है।)</li>
-                        <li><b>ऑफिस की बात ऑफिस के गेट पर छोड़ें:</b> शाम को घर आते समय याद रखें कि आपकी असली पहचान आपका परिवार और आपकी नई स्किल्स हैं।</li>
-                        <li><b>Silent Upgrade:</b> जब ऑफिस में लोग पॉलिटिक्स करें, तब आप चुपचाप अपना Python, SQL और Excel इतना मजबूत कर लें कि अगले 6 महीने में आपके पास उससे दोगुनी सैलरी का ऑफर हो!</li>
-                    </ol>
+                    <h4 style="color:#fbbf24; margin-top:0;">🗣️ जब अंग्रेज़ी बोलते समय जुबान अटक जाए — तब क्या करें?</h4>
+                    <p><b>सच्चाई:</b> अगर आप हिंदी और गढ़वाली जानते हुए इंग्लिश सीख रहे हैं, तो आपका दिमाग 2-3 भाषाओं को प्रोसेस कर रहा है। अटकना कमजोरी नहीं, प्रैक्टिस की निशानी है!</p>
+                    <ul>
+                        <li><b>Mirror Rule:</b> रोज़ सुबह 5 मिनट शीशे के सामने खड़े होकर अपने ऑफिस की 5 लाइनें बोलें।</li>
+                        <li><b>3 Ready Sentences:</b> <i>"Let me check the latest status and revert in 10 minutes."</i>, <i>"I have combined the files using Power Query."</i>, <i>"Thank you for your patience, sir."</i></li>
+                    </ul>
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -2121,237 +2452,118 @@ with tab_comeback:
             st.markdown(
                 """
                 <div class="vip-card">
-                    <h4 style="color:#f97316; margin-top:0;">💸 जब अचानक कोई बड़ा खर्च आ जाए और बजट गड़बड़ा जाए — तब क्या करें?</h4>
-                    <ol>
-                        <li><b>खुद को दोष मत दें:</b> परिवार और सेहत (जैसे कान का इलाज या माता-पिता की ज़रूरत) के लिए ही पैसा कमाया जाता है।</li>
-                        <li><b>अगले 10 दिन 'Zero-Wastage Mode' चलाएं:</b> अगर किसी दिन ₹1,000 एक्स्ट्रा खर्च हो गया, तो अगले 10 दिनों तक बाहर की चाय, नाश्ता और ऑटो बंद करके ₹100/दिन बचाएं—बजट अपने-आप बराबर हो जाएगा!</li>
-                    </ol>
+                    <h4 style="color:#00ff9d; margin-top:0;">🚀 हर रुकावट से दोगुनी ताकत से वापसी का नियम:</h4>
+                    <p>चाहे कोडिंग का Error हो, ऑफिस का दबाव हो या अचानक आया खर्च—1 गहरी सांस लें, समस्या को कागज़ पर 2 हिस्सों में बांटें और आज सिर्फ पहले छोटे कदम पर एक्शन लें।</p>
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
 
-    # ==========================================================================
-    # PLAYABLE MIND GAMES (MENTAL MATH, BRAIN RIDDLES, ENGLISH WORD CHALLENGE)
-    # ==========================================================================
     with game_tab:
-        st.markdown("#### 🎮 दिमागी कसरत और माइंड गेम्स (Brain Sharpness Games)")
         if "mind_game_score" not in st.session_state:
             st.session_state.mind_game_score = 0
-
         st.metric("🏆 आपका कुल दिमागी स्कोर (Brain Score)", f"{st.session_state.mind_game_score} Points")
 
-        g_sub1, g_sub2, g_sub3 = st.tabs(
-            ["🔢 1. तेज़ हिसाब चैलेंज", "🕵️ 2. दिमागी पहेलियाँ (Riddles)", "🔤 3. English & Tech Quiz"]
-        )
+        if "math_q" not in st.session_state:
+            a, b = random.randint(15, 65), random.randint(12, 45)
+            st.session_state.math_q = f"{a} + {b}"
+            st.session_state.math_ans = a + b
 
-        # GAME 1: FAST MENTAL MATH & SAVINGS GAME
-        with g_sub1:
-            st.markdown("##### 🔢 गेम 1: फटाफट हिसाब लगाओ (Mental Math Sharpener)")
-            if "math_q" not in st.session_state:
-                a = random.randint(12, 49)
-                b = random.randint(11, 39)
-                op = random.choice(["+", "-", "*"])
-                if op == "+":
-                    ans = a + b
-                elif op == "-":
-                    ans = a - b
-                else:
-                    a, b = random.randint(6, 19), random.randint(4, 12)
-                    ans = a * b
-                st.session_state.math_q = f"{a} {op} {b}"
-                st.session_state.math_ans = ans
-
-            st.markdown(
-                f"<div class='vip-card' style='text-align:center;'><h3>सवाल: <code>{st.session_state.math_q} = ?</code></h3></div>",
-                unsafe_allow_html=True,
-            )
-            user_math = st.number_input("अपना जवाब लिखें:", value=0, step=1, key="math_in")
-            mc1, mc2 = st.columns(2)
-            if mc1.button("✅ जवाब चेक करें", key="chk_math"):
-                if int(user_math) == int(st.session_state.math_ans):
-                    st.session_state.mind_game_score += 10
-                    st.balloons()
-                    st.success("🎉 बिल्कुल सही जवाब! +10 Points मिले!")
-                    del st.session_state.math_q
-                else:
-                    st.error(f"❌ थोड़ा चूक गए! सही जवाब {st.session_state.math_ans} था। फिर से कोशिश करें!")
-            if mc2.button("🔄 नया सवाल लाएं", key="new_math"):
-                if "math_q" in st.session_state:
-                    del st.session_state.math_q
-                st.rerun()
-
-        # GAME 2: HINDI BRAIN RIDDLES & LOGIC PUZZLES
-        with g_sub2:
-            st.markdown("##### 🕵️ गेम 2: बुद्धिमान पहेलियाँ (Logic & IQ Riddles)")
-            RIDDLES = [
-                {
-                    "q": "वह क्या है जो आपके पास जितना ज़्यादा होता है, आपको उतना ही कम दिखाई देता है?",
-                    "options": ["पैसा", "अंधेरा (Darkness)", "पानी", "सपना"],
-                    "ans": "अंधेरा (Darkness)",
-                },
-                {
-                    "q": "अगर आप एक रेस में दौड़ रहे हैं और आपने दूसरे (2nd) नंबर वाले धावक को पीछे छोड़ दिया, तो अब आप किस नंबर पर हैं?",
-                    "options": ["पहले (1st) नंबर पर", "दूसरे (2nd) नंबर पर", "तीसरे (3rd) नंबर पर", "चौथे नंबर पर"],
-                    "ans": "दूसरे (2nd) नंबर पर",
-                },
-                {
-                    "q": "ऐसी कौन सी चीज़ है जिसे तोड़ने पर कोई आवाज़ नहीं आती, लेकिन इंसान बहुत मजबूत बन जाता है?",
-                    "options": ["कांच", "आलस और रिकॉर्ड (Laziness / Record)", "लकड़ी", "पत्थर"],
-                    "ans": "आलस और रिकॉर्ड (Laziness / Record)",
-                },
-                {
-                    "q": "एक आदमी बारिश में बिना छाते और बिना टोपी के बाहर निकला, फिर भी उसके सिर का एक भी बाल गीला नहीं हुआ। कैसे?",
-                    "options": ["बारिश नकली थी", "वह गंजा था (He was bald)", "वह तेज़ भागा", "हवा चल रही थी"],
-                    "ans": "वह गंजा था (He was bald)",
-                },
-                {
-                    "q": "यदि ₹38,000 में से ₹15,000 हर महीने बचाए जाएं, तो 1 साल (12 महीने) में बिना ब्याज के कुल कितनी रकम जमा होगी?",
-                    "options": ["₹1,50,000", "₹1,80,000", "₹2,00,000", "₹1,65,000"],
-                    "ans": "₹1,80,000",
-                },
-            ]
-            if "riddle_idx" not in st.session_state:
-                st.session_state.riddle_idx = 0
-
-            curr_r = RIDDLES[st.session_state.riddle_idx % len(RIDDLES)]
-            st.markdown(f"<div class='vip-card'><b>पहेली:</b> {curr_r['q']}</div>", unsafe_allow_html=True)
-            r_choice = st.radio("सही उत्तर चुनें:", curr_r["options"], key=f"rad_r_{st.session_state.riddle_idx}")
-            rc1, rc2 = st.columns(2)
-            if rc1.button("✅ पहेली का उत्तर जांचें"):
-                if r_choice == curr_r["ans"]:
-                    st.session_state.mind_game_score += 15
-                    st.success(f"🏆 शाबाश! '{curr_r['ans']}' बिल्कुल सही है! (+15 Points)")
-                else:
-                    st.warning("🤔 फिर से सोचिए! एक और कोशिश करें।")
-            if rc2.button("➡️ अगली पहेली"):
-                st.session_state.riddle_idx += 1
-                st.rerun()
-
-        # GAME 3: SPOKEN ENGLISH & TECH QUIZ
-        with g_sub3:
-            st.markdown("##### 🔤 गेम 3: ऑफिस इंग्लिश और टेक क्विज़")
-            QUIZ_LIST = [
-                {
-                    "q": "ऑफिस में 'मैं यह काम आज शाम तक पूरा कर दूंगा' को प्रोफेशनल इंग्लिश में कैसे बोलेंगे?",
-                    "options": [
-                        "I will complete this task by EOD today.",
-                        "I am doing work night today.",
-                        "Work finish evening today.",
-                    ],
-                    "ans": "I will complete this task by EOD today.",
-                },
-                {
-                    "q": "Python में किसी Excel या CSV फाइल को पढ़ने के लिए Pandas का कौन-सा कमांड इस्तेमाल होता है?",
-                    "options": ["pd.read_csv() / pd.read_excel()", "pd.open_file()", "python.load_sheet()"],
-                    "ans": "pd.read_csv() / pd.read_excel()",
-                },
-                {
-                    "q": "Excel में पुरानी VLOOKUP की जगह नया और सबसे तेज़ फॉर्मूला कौन-सा है?",
-                    "options": ["XLOOKUP", "ZLOOKUP", "FASTLOOKUP"],
-                    "ans": "XLOOKUP",
-                },
-            ]
-            if "quiz_idx" not in st.session_state:
-                st.session_state.quiz_idx = 0
-
-            curr_q = QUIZ_LIST[st.session_state.quiz_idx % len(QUIZ_LIST)]
-            st.markdown(f"<div class='vip-card'><b>सवाल:</b> {curr_q['q']}</div>", unsafe_allow_html=True)
-            q_ans = st.radio("उत्तर चुनें:", curr_q["options"], key=f"q_rad_{st.session_state.quiz_idx}")
-            qc_a, qc_b = st.columns(2)
-            if qc_a.button("✅ क्विज़ चेक करें"):
-                if q_ans == curr_q["ans"]:
-                    st.session_state.mind_game_score += 20
-                    st.success("🎉 एकदम परफेक्ट! +20 Points!")
-                else:
-                    st.error(f"सही उत्तर है: {curr_q['ans']}")
-            if qc_b.button("➡️ अगला सवाल"):
-                st.session_state.quiz_idx += 1
-                st.rerun()
+        st.markdown(f"<div class='vip-card'><b>तेज़ हिसाब सवाल:</b> <code>{st.session_state.math_q} = ?</code></div>", unsafe_allow_html=True)
+        ans_in = st.number_input("उत्तर लिखें:", value=0, step=1)
+        if st.button("✅ उत्तर चेक करें"):
+            if int(ans_in) == int(st.session_state.math_ans):
+                st.session_state.mind_game_score += 10
+                st.balloons()
+                st.success("🎉 बिल्कुल सही! +10 Points!")
+                del st.session_state.math_q
+            else:
+                st.error(f"सही जवाब {st.session_state.math_ans} था!")
 
 
 # ==============================================================================
-# TAB 7: 100% AD-FREE APP DOWNLOAD + AJAY SUPER-ADMIN PANEL
+# TAB 7: ANTI-DELETE BACKUP SHIELD + ZERO-AD APP + AJAY ADMIN PANEL
 # ==============================================================================
 with tab_admin:
     st.markdown(
         """
         <div class="vip-card">
-            <h4 style="margin:0; color:#00ff9d;">📲 100% Free & Zero-Ads Mobile App Download (बिना किसी विज्ञापन के)</h4>
-            <p style="margin:6px 0 0 0; font-size:0.88rem;">
-                किसी भी थर्ड-पार्टी विज्ञापन वाली वेबसाइट की ज़रूरत नहीं! नीचे दिए गए बटन से <b>100% Ad-Free Native App File</b> सीधे अपने फोन में डाउनलोड करें,
-                या Chrome के 3 बिंदुओं (⋮) पर टैप करके <b>Install App</b> दबाएं।
+            <h4 style="margin:0; color:#00ff9d;">🛡️ Zero-Data-Loss Backup Shield (ऐप रीबूट या स्लीप होने पर भी रिकॉर्ड कभी नहीं मिटेगा!)</h4>
+            <p style="margin:4px 0 0 0; font-size:0.86rem;">
+                1. ऐप हर एंट्री के साथ अपने-आप <code>parivaar_auto_mirror_v5.json</code> में ऑटो-बैकअप बनाता है।<br>
+                2. नीचे दिए गए बटन से आप कभी भी 1-Click में अपना <b>Master Backup File (.json)</b> फोन में डाउनलोड कर सकते हैं और कभी भी ऐप रीसेट होने पर 1 सेकंड में <b>Restore</b> कर सकते हैं!
             </p>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
+    bk_c1, bk_c2 = st.columns(2)
+    with bk_c1:
+        live_json_backup = export_full_backup_json()
+        st.download_button(
+            label="📥 1-Click Master Backup डाउनलोड करें (.json)",
+            data=live_json_backup.encode("utf-8"),
+            file_name=f"Parivaar_Bank_Backup_{today_str}.json",
+            mime="application/json",
+        )
+    with bk_c2:
+        uploaded_bk = st.file_uploader("📤 पुरानी Backup File यहाँ डालकर 1-Click Restore करें", type=["json"])
+        if uploaded_bk is not None:
+            if st.button("🔄 सारा रिकॉर्ड अभी Restore करें"):
+                ok = restore_from_backup_json(uploaded_bk.read().decode("utf-8"))
+                if ok:
+                    st.success("🎉 आपके सारे खर्च, तिजोरी और शॉपिंग रिकॉर्ड 100% वापस आ गए!")
+                    st.rerun()
+                else:
+                    st.error("❌ फाइल पढ़ने में त्रुटि आई।")
+
+    st.markdown("---")
     clean_app_bytes = generate_zero_ad_fullscreen_app_file()
     st.download_button(
-        label="📲 Download 100% Ad-Free Parivaar VIP App (Zero Ads Forever)",
+        label="📲 Download 100% Ad-Free Parivaar VIP 5.0 Mobile App (Zero Ads Forever)",
         data=clean_app_bytes,
-        file_name="Parivaar_VIP_4_AdFree_App.html",
+        file_name="Parivaar_VIP_5_Universal_App.html",
         mime="text/html",
     )
 
-    with st.expander("🛠️ अगर अलग Android .APK फाइल बिना किसी विज्ञापन (0% Ads) के मुफ्त में बनानी हो:"):
-        st.markdown(
-            """
-            1. अपने ब्राउज़र में Microsoft की आधिकारिक फ्री वेबसाइट **[pwabuilder.com](https://www.pwabuilder.com/)** खोलें।
-            2. वहां अपने इस Streamlit ऐप का लिंक पेस्ट करें और **Start** दबाएं।
-            3. **Package for stores** $\rightarrow$ **Android** $\rightarrow$ **Download Package** पर टैप करें।
-            4. आपको **बिना एक भी विज्ञापन (100% Ad-Free)** वाली असली `.apk` फाइल बिल्कुल मुफ्त में मिल जाएगी!
-            """
-        )
-
-    st.markdown("---")
     if is_admin:
+        st.markdown("---")
         st.markdown("### 👑 अजय सुपर एडमिन पैनल (User ID & Password Control)")
-        st.info("यहाँ सिर्फ **Ajay (Admin - Password: `52729211`)** ही किसी का पासवर्ड बदल सकता है या नया यूज़र अकाउंट बना सकता है।")
-
-        users_table_rows = []
-        for u_name, u_data in USERS_DICT.items():
-            users_table_rows.append(
-                {
-                    "Avatar": u_data["avatar"],
-                    "User ID (नाम)": u_name,
-                    "Current Password / PIN": u_data["password"],
-                    "Role": u_data["role"],
-                    "Admin Access": "👑 YES (Admin)" if u_data["is_admin"] else "👤 Member Only",
-                }
-            )
+        users_table_rows = [
+            {
+                "Avatar": u_data["avatar"],
+                "User ID": u_name,
+                "Password": u_data["password"],
+                "Role": u_data["role"],
+                "Admin": "👑 YES" if u_data["is_admin"] else "👤 Member",
+            }
+            for u_name, u_data in USERS_DICT.items()
+        ]
         st.dataframe(pd.DataFrame(users_table_rows), use_container_width=True, hide_index=True)
 
-        adm_u1, adm_u2 = st.columns(2)
-        with adm_u1:
-            st.markdown("#### 🔑 पासवर्ड बदलें या नया यूज़र बनाएं")
-            with st.form("admin_upsert_user_form"):
-                u_name_in = st.text_input("👤 User ID (नया या पुराना नाम लिखें)", placeholder="जैसे: Ajay, Meenakshi, Ajeet, Jyoti...")
-                u_pass_in = st.text_input("🔑 नया पासवर्ड / PIN", placeholder="नया पासवर्ड डालें...")
-                u_role_in = st.text_input("🏷️ परिवार में भूमिका (Role)", value="Family Member")
-                u_av_in = st.selectbox("😀 आइकॉन चुनें", ["👑", "👨‍💻", "👩‍💼", "🧑‍🎓", "👴", "👵", "👦", "👧"])
-                u_adm_in = st.checkbox("👑 क्या इन्हें भी Admin पावर देनी है?", value=False)
-
-                if st.form_submit_button("✅ यूज़र / पासवर्ड सेव करें"):
-                    if u_name_in.strip() and u_pass_in.strip():
-                        final_adm = True if u_name_in.strip().lower() == "ajay" else u_adm_in
-                        upsert_user_account(u_name_in, u_pass_in, u_role_in, final_adm, u_av_in)
-                        st.success(f"✅ '{u_name_in}' का अकाउंट और पासवर्ड अपडेट हो गया!")
-                        st.rerun()
-                    else:
-                        st.error("कृपया नाम और पासवर्ड दोनों भरें!")
-
-        with adm_u2:
-            st.markdown("#### 🗑️ किसी यूज़र की एक्सेस हटाएं")
-            non_ajay_users = [u for u in USERS_DICT.keys() if u.lower() != "ajay"]
-            if non_ajay_users:
-                del_u_target = st.selectbox("हटाने के लिए यूज़र चुनें", options=non_ajay_users)
-                if st.button("🚫 इस यूज़र का अकाउंट हटाएं"):
-                    delete_user_account(del_u_target)
-                    st.success(f"'{del_u_target}' का अकाउंट हटा दिया गया!")
+        with st.form("admin_upsert_user_form"):
+            u_name_in = st.text_input("👤 User ID", placeholder="जैसे: Ajay, Meenakshi, Ajeet...")
+            u_pass_in = st.text_input("🔑 नया पासवर्ड / PIN")
+            u_role_in = st.text_input("🏷️ भूमिका (Role)", value="Universal Parivaar Member")
+            u_av_in = st.selectbox("😀 आइकॉन", ["👑", "👩‍💼", "👨‍💻", "🧑‍🎓", "👴", "👵"])
+            u_adm_in = st.checkbox("👑 Admin पावर दें?", value=False)
+            if st.form_submit_button("✅ यूज़र / पासवर्ड सेव करें"):
+                if u_name_in.strip() and u_pass_in.strip():
+                    final_adm = True if u_name_in.strip().lower() == "ajay" else u_adm_in
+                    upsert_user_account(u_name_in, u_pass_in, u_role_in, final_adm, u_av_in)
+                    st.success(f"✅ '{u_name_in}' का अकाउंट अपडेट हो गया!")
                     st.rerun()
-            else:
-                st.caption("हटाने के लिए कोई अतिरिक्त यूज़र नहीं है। (Ajay Admin को हटाया नहीं जा सकता)")
-    else:
-        st.warning("🔒 **Admin Access Restricted:** यूज़र पासवर्ड बदलने, नया अकाउंट बनाने या गलत डेटा डिलीट करने का अधिकार सिर्फ **Chief Admin (Ajay)** के पास है।")
+
+# Keep-Awake Subtle Heartbeat so browser tab keeps session active
+components.html(
+    """
+    <script>
+    setInterval(function() {
+        const dt = new Date();
+        console.log("Parivaar VIP 5.0 Keep-Alive Heartbeat: " + dt.toISOString());
+    }, 45000);
+    </script>
+    """,
+    height=0,
+)
